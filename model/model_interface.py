@@ -12,11 +12,22 @@ import random
 from pandas.core.frame import DataFrame
 import os.path as op
 import os
+import csv
+import json
+import time
+import subprocess
 from optims import LinearWarmupCosineLRScheduler
 import numpy as np
 from .peft import get_peft_config, get_peft_model, get_peft_model_state_dict, LoraConfig, TaskType, PeftModel, MoeLoraConfig, MoeLoraModel
 import pickle
 from .router.nlpr import LambdaLayer, ResidualBlock, GateFunction, NLPRecommendationRouter, build_router
+from .routing_utils import (
+    parse_cluster_expert_mapping,
+    validate_expert_mapping,
+    build_onehot_gate,
+    load_assignment_csv,
+    gate_diagnostics,
+)
 
 
 # from peft import get_peft_config, get_peft_model, get_peft_model_state_dict, LoraConfig, TaskType, PeftModel
@@ -33,7 +44,176 @@ class MInterface(pl.LightningModule):
         self.load_rec_model(self.hparams.rec_model_path)
         self.load_projector()
         self.gradient_storage = {}
-    
+        self._setup_routing_mode()
+
+    def _setup_routing_mode(self):
+        """Set up --routing_mode state. dynamic (default) touches nothing here; cluster_hard
+        loads fixed cluster-assignment lookup tables. See
+        experiments/IMPLEMENTATION_NOTES.md sections 4-6 for the design rationale."""
+        self.routing_mode = getattr(self.hparams, 'routing_mode', 'dynamic')
+        self._router_call_count = 0
+        self._gate_export_rows = []
+        self._cluster_mapping = None
+        self._cluster_assignments = None
+
+        if self.routing_mode == 'cluster_hard':
+            if self.hparams.router != 'share':
+                raise ValueError(
+                    "--routing_mode cluster_hard requires --router share: the gate produced by "
+                    "_resolve_gate is only wired into the MoE-LoRA layers on the 'share' path "
+                    "(see CODEBASE_ANALYSIS.md section A/B)."
+                )
+            self._cluster_mapping = parse_cluster_expert_mapping(self.hparams.cluster_expert_mapping)
+            num_clusters = max(self._cluster_mapping.keys()) + 1
+            validate_expert_mapping(self._cluster_mapping, num_clusters=num_clusters, num_moe=self.hparams.num_moe)
+
+            assignment_dir = self.hparams.cluster_assignment_dir
+            self._cluster_assignments = {
+                'train': load_assignment_csv(op.join(assignment_dir, 'train_assignments.csv')),
+                'validation': load_assignment_csv(op.join(assignment_dir, 'validation_assignments.csv')),
+                'test': load_assignment_csv(op.join(assignment_dir, 'test_assignments.csv')),
+            }
+
+            if self.hparams.cluster_model_path:
+                if not op.exists(self.hparams.cluster_model_path):
+                    raise FileNotFoundError(
+                        f"--cluster_model_path {self.hparams.cluster_model_path} does not exist. "
+                        "Run scripts/fit_kmeans.py first."
+                    )
+
+            if hasattr(self, 'router'):
+                for p in self.router.parameters():
+                    p.requires_grad = False
+                print('[cluster_hard] router parameters frozen (requires_grad=False); '
+                      'router.forward is never called in this routing_mode, see '
+                      'experiments/IMPLEMENTATION_NOTES.md section 5.')
+
+    def _resolve_gate(self, user_embeds, batch, split):
+        """Single point where the gate fed into the MoE-LoRA layers is produced.
+
+        dynamic: identical to the original `self.router(user_embeds)` call.
+        cluster_hard: one-hot gate from a fixed, precomputed cluster assignment looked up by
+        `sample_idx`, never recomputed on the fly (experiments/IMPLEMENTATION_NOTES.md section 4).
+        """
+        if self.routing_mode == 'dynamic':
+            self._router_call_count += 1
+            return self.router(user_embeds)
+
+        if self.routing_mode == 'cluster_hard':
+            assignments = self._cluster_assignments[split]
+            sample_idx = batch['sample_idx'].tolist()
+            expert_ids = []
+            for idx in sample_idx:
+                if idx not in assignments:
+                    raise KeyError(f"No cluster assignment for sample_idx={idx} split={split} "
+                                    f"in {self.hparams.cluster_assignment_dir}/{split}_assignments.csv")
+                cluster_id = assignments[idx]
+                expert_ids.append(self._cluster_mapping[cluster_id])
+            return build_onehot_gate(expert_ids, self.hparams.num_moe,
+                                      device=user_embeds.device, dtype=user_embeds.dtype)
+
+        raise ValueError(f"Unknown routing_mode {self.routing_mode!r}")
+
+    def _record_gate_export(self, sample_idx, gate_weights, user_embeds, split):
+        """Buffer one batch's worth of gate/representation rows in memory. Flushed once per
+        epoch by _flush_gate_export — no per-step CSV I/O (spec section 4)."""
+        gate = gate_weights.detach().float().cpu().squeeze(1)  # [batch, num_moe]
+        rep = user_embeds.detach().float().cpu().squeeze(1)    # [batch, sasrec_dim]
+        idx = sample_idx.detach().cpu().tolist() if torch.is_tensor(sample_idx) else list(sample_idx)
+        argmax_expert = gate.argmax(dim=-1).tolist()
+        for i in range(gate.shape[0]):
+            row = {
+                'sample_id': idx[i],
+                'user_id': 'NOT_AVAILABLE',
+                'split': split,
+                'argmax_expert': argmax_expert[i],
+            }
+            for k in range(gate.shape[1]):
+                row[f'gate_{k}'] = gate[i, k].item()
+            for d in range(rep.shape[1]):
+                row[f'sasrec_{d}'] = rep[i, d].item()
+            self._gate_export_rows.append(row)
+
+    def _flush_gate_export(self, split):
+        """Write results/<results_dir>/gates_<split>.csv from the in-memory buffer."""
+        if not self._gate_export_rows:
+            return
+        os.makedirs(self.hparams.results_dir, exist_ok=True)
+        out_path = op.join(self.hparams.results_dir, f'gates_{split}.csv')
+        fieldnames = list(self._gate_export_rows[0].keys())
+        with open(out_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self._gate_export_rows)
+
+        gate_tensor = torch.tensor([[row[f'gate_{k}'] for k in range(self.hparams.num_moe)]
+                                     for row in self._gate_export_rows])
+        diag = gate_diagnostics(gate_tensor)
+        if not diag['sum_ok'] or diag['has_nan'] or diag['has_inf']:
+            print(f"[export_gates][WARNING] {out_path}: {diag['num_rows_violating']} row(s) "
+                  f"failed gate validation (has_nan={diag['has_nan']}, has_inf={diag['has_inf']})")
+        print(f"[export_gates] wrote {len(self._gate_export_rows)} rows to {out_path}")
+        self._gate_export_rows = []
+
+    def _write_metrics_json(self, prediction_valid_ratio, hr, metric, elapsed_seconds):
+        """Write results/<results_dir>/metrics.json with the real, measured values only.
+        No number here is invented; anything not measurable locally is 'NOT_RUN'."""
+        try:
+            commit_hash = subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], cwd=op.dirname(op.abspath(__file__))
+            ).decode().strip()
+        except Exception:
+            commit_hash = 'NOT_RUN'
+
+        try:
+            import transformers as _tf
+            transformers_version = _tf.__version__
+        except Exception:
+            transformers_version = 'NOT_RUN'
+
+        try:
+            from . import peft as _peft
+            peft_version = getattr(_peft, '__version__', 'NOT_RUN')
+        except Exception:
+            peft_version = 'NOT_RUN'
+
+        if torch.cuda.is_available():
+            gpu_model = torch.cuda.get_device_name(0)
+        else:
+            gpu_model = 'NOT_RUN (no CUDA device visible)'
+
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        metrics = {
+            'git_commit_hash': commit_hash,
+            'seed': self.hparams.seed,
+            'dataset': self.hparams.dataset,
+            'routing_mode': self.routing_mode,
+            'num_moe': self.hparams.num_moe,
+            'lora_r': self.hparams.lora_r,
+            'epochs': self.hparams.max_epochs,
+            'learning_rate': self.hparams.lr,
+            'batch_size': self.hparams.batch_size,
+            'accumulate_grad_batches': self.hparams.accumulate_grad_batches,
+            'candidate_count': self.hparams.cans_num,
+            'trainable_params': int(trainable_params),
+            'llm_path_basename': os.path.basename(os.path.normpath(self.hparams.llm_path)),
+            'test_prediction_valid': prediction_valid_ratio,
+            'test_hr': hr,
+            'metric': metric,
+            'elapsed_seconds': elapsed_seconds,
+            'gpu_model': gpu_model,
+            'torch_version': torch.__version__,
+            'transformers_version': transformers_version,
+            'peft_version': peft_version,
+            'pytorch_lightning_version': pl.__version__,
+        }
+        os.makedirs(self.hparams.results_dir, exist_ok=True)
+        out_path = op.join(self.hparams.results_dir, 'metrics.json')
+        with open(out_path, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        print(f"[metrics] wrote {out_path}")
+
     def forward(self, batch):
         targets = batch["tokens"].input_ids.masked_fill(
             batch["tokens"].input_ids == self.llama_tokenizer.pad_token_id, -100
@@ -45,7 +225,7 @@ class MInterface(pl.LightningModule):
         input_embeds, user_embeds = self.wrap_emb(batch)
 
         if self.hparams.router == 'share':
-            gate_weights = self.router(user_embeds)
+            gate_weights = self._resolve_gate(user_embeds, batch, split='train')
             outputs = self.llama_model(
                 inputs_embeds=input_embeds,
                 attention_mask=batch["tokens"].attention_mask,
@@ -56,7 +236,7 @@ class MInterface(pl.LightningModule):
                 gate_weights=gate_weights
             )
             return outputs
-        
+
         outputs = self.llama_model(
             inputs_embeds=input_embeds,
             attention_mask=batch["tokens"].attention_mask,
@@ -67,10 +247,12 @@ class MInterface(pl.LightningModule):
         )
         return outputs
 
-    def generate(self, batch,temperature=0.8,do_sample=False,num_beams=1,max_gen_length=64,min_gen_length=1,repetition_penalty=1.0,length_penalty=1.0, num_return_sequences=1):
+    def generate(self, batch,temperature=0.8,do_sample=False,num_beams=1,max_gen_length=64,min_gen_length=1,repetition_penalty=1.0,length_penalty=1.0, num_return_sequences=1, split=None):
         input_embeds, user_embeds = self.wrap_emb(batch)
         if self.hparams.router == 'share':
-            gate_weights = self.router(user_embeds)
+            gate_weights = self._resolve_gate(user_embeds, batch, split=split)
+            if self.hparams.export_gates and split is not None:
+                self._record_gate_export(batch['sample_idx'], gate_weights, user_embeds, split)
             generate_ids = self.llama_model.generate(
                 inputs_embeds=input_embeds,
                 attention_mask=batch["tokens"].attention_mask,
@@ -154,10 +336,12 @@ class MInterface(pl.LightningModule):
             "real":[],
             "cans":[],
         }
+        self._gate_export_rows = []
+        self._router_call_count = 0
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
-        generate_output = self.generate(batch)
+        generate_output = self.generate(batch, split='validation')
         output=[]
         for i,generate in enumerate(generate_output):
             real=batch['correct_answer'][i]
@@ -182,6 +366,10 @@ class MInterface(pl.LightningModule):
         self.log('val_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_hr', hr, on_step=False, on_epoch=True, prog_bar=True)
         self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True)
+        print(f"[routing_mode={self.routing_mode}] router forward calls this validation epoch: "
+              f"{self._router_call_count}")
+        if self.hparams.export_gates:
+            self._flush_gate_export('validation')
 
     def on_test_epoch_start(self):
         self.test_content={
@@ -189,10 +377,13 @@ class MInterface(pl.LightningModule):
             "real":[],
             "cans":[],
         }
+        self._gate_export_rows = []
+        self._router_call_count = 0
+        self._test_epoch_start_time = time.time()
 
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
-        generate_output = self.generate(batch)
+        generate_output = self.generate(batch, split='test')
         output=[]
         for i,generate in enumerate(generate_output):
             real=batch['correct_answer'][i]
@@ -218,6 +409,12 @@ class MInterface(pl.LightningModule):
         self.log('test_prediction_valid', prediction_valid_ratio, on_step=False, on_epoch=True, prog_bar=True)
         self.log('test_hr', hr, on_step=False, on_epoch=True, prog_bar=True)
         self.log('metric', metric, on_step=False, on_epoch=True, prog_bar=True)
+        print(f"[routing_mode={self.routing_mode}] router forward calls this test epoch: "
+              f"{self._router_call_count}")
+        if self.hparams.export_gates:
+            self._flush_gate_export('test')
+        elapsed_seconds = time.time() - self._test_epoch_start_time
+        self._write_metrics_json(prediction_valid_ratio, hr, metric, elapsed_seconds)
 
     def configure_optimizers(self):
         if hasattr(self.hparams, 'weight_decay'):

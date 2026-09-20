@@ -137,6 +137,15 @@ if __name__ == '__main__':
     
     parser.add_argument('--router', default='unshare', choices=['share', 'unshare'], type=str)
 
+    # exp/gate-cluster: routing-mode experiment additions. Defaults reproduce the original
+    # dynamic-routing baseline exactly; see experiments/IMPLEMENTATION_NOTES.md section 6/11.
+    parser.add_argument('--routing_mode', default='dynamic', choices=['dynamic', 'cluster_hard'], type=str)
+    parser.add_argument('--cluster_model_path', default=None, type=str)
+    parser.add_argument('--cluster_assignment_dir', default='results/clustering', type=str)
+    parser.add_argument('--cluster_expert_mapping', default='0:0,1:1,2:2,3:3', type=str)
+    parser.add_argument('--export_gates', default=False, action='store_true')
+    parser.add_argument('--results_dir', default='results/baseline', type=str)
+
     args = parser.parse_args()
     
     if 'movielens' in args.data_dir:

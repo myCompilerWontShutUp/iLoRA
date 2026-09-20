@@ -28,6 +28,7 @@ class SteamData(data.Dataset):
         candidates = self.negative_sampling(temp['seq_unpad'],temp['next'])
         cans_name=[self.item_id2name[can] for can in candidates]
         sample = {
+            'sample_idx': i,
             'seq': temp['seq'],
             'seq_name': temp['seq_title'],
             'len_seq': temp['len_seq'],
