@@ -203,6 +203,66 @@ a `layers_pattern` config, which this experiment never sets). Per spec §0.2 (no
 refactors) and §23 (only implement what today's experiment needs), these are left as-is and
 recorded here rather than fixed.
 
+## 11c. Preflight code review before real A100 usage (2026-09-21)
+
+A pre-spend review of the actual exp/gate-cluster implementation (not a new phase of work)
+checked determinism, fixed-vs-recomputed cluster assignment, pipeline ordering, and the
+setup/preflight scripts' ability to catch environment problems before GPU time is spent. Two
+real gaps were found and fixed with minimal, targeted changes:
+
+- **`scripts/preflight_vessl.sh` did not hard-fail on a broken torch/CUDA install.** It printed
+  `torch.cuda.is_available()` and `torch.cuda.device_count()` but never checked them —
+  `requirements.txt` pins `torch==2.0.0` with no CUDA-build pin, so a driver/runtime mismatch on
+  the actual VESSL image could pass `nvidia-smi`'s GPU-count check (a driver-level check) while
+  torch itself still cannot see the GPU, and this would previously have gone undetected until
+  training was already underway. Fixed: preflight now explicitly asserts
+  `torch.cuda.is_available()` is `True` and `torch.cuda.device_count() == 1`, exiting non-zero
+  before training if not. Verified locally that this check correctly fails (exit code 1) on this
+  CPU-only machine, where `torch.cuda.is_available()` is `False`.
+- **`setup_vessl.sh` had no import-time smoke test.** `model/peft/import_utils.py`'s
+  `is_bnb_available()` only checks `importlib.util.find_spec("bitsandbytes")` (is the package on
+  disk?), not whether it actually imports — `model/peft/tuners/moelora.py` does
+  `if is_bnb_available(): import bitsandbytes` at module load time, and a bitsandbytes native
+  extension that fails to load (a known failure mode for the old pinned `bitsandbytes==0.37.2`
+  against a mismatched CUDA toolkit) would crash `import main` — and therefore every single
+  training/eval command — even though this experiment never uses 8-bit/4-bit loading and gains
+  nothing from bitsandbytes actually working. Fixed: `setup_vessl.sh` now does
+  `import transformers; import pytorch_lightning; import model.peft` right after
+  `pip install -r requirements.txt` and aborts with a clear message if any of the three fail,
+  catching this (and any transformers-debug-file-driven import break) once, cheaply, at setup
+  time instead of repeatedly inside `run_all_vessl.sh`.
+
+Both fixes were verified locally (embedded Python blocks syntax-checked by extraction and
+`compile()`; the new preflight CUDA gate and the new setup import-smoke-test were each run
+directly and confirmed to fail with a clear message and exit code 1 in this GPU-less/deps-less
+local environment, which is the correct behavior here). `scripts/smoke_test_routing.py`'s full
+17-check suite was re-run and still passes.
+
+Everything else reviewed came back clean, matching the design already recorded above, and was
+left unmodified per the reviewer's instruction not to expand scope:
+- `scripts/extract_representations.py` forces `rec_model.eval()` unconditionally (line 38) and
+  never calls `.train()`; empirically verified locally by running it twice, independently, end to
+  end against the real `rec_model/movielens.pt` checkpoint and the real MovieLens
+  validation/test splits — the two runs' `sasrec` arrays were bit-for-bit identical
+  (`max_abs_diff == 0.0`), not merely within floating-point tolerance.
+- `MInterface._resolve_gate`'s `cluster_hard` branch only does dict lookups into
+  `self._cluster_assignments` (loaded once, at `__init__`, from the fixed assignment CSVs); it
+  never calls `self.router(...)` or any KMeans `.predict()` — confirmed by re-reading
+  `model/model_interface.py` lines 91-115.
+- `scripts/fit_kmeans.py` calls `kmeans.fit_predict(train_reps)` on the train split only and
+  `kmeans.predict(...)` (no further fitting) on validation/test — confirmed by re-reading lines
+  56-63.
+- `run_baseline_movielens.sh` step 5 (representation export) and `run_cluster_hard_movielens.sh`
+  steps 1-3 (representation check, KMeans fit, assignment-file existence check) run, and are
+  ordered, strictly before any cluster_hard training command; `run_all_vessl.sh` calls the
+  baseline script before the cluster-hard script. `MInterface._setup_routing_mode` also
+  independently fails fast (`FileNotFoundError`) if an assignment CSV is missing, so an ordering
+  mistake would surface immediately rather than silently.
+- `LLM_PATH` is required to be an existing local filesystem path
+  (`scripts/preflight_vessl.sh`'s `[[ ! -e "$LLM_PATH" ]]` check) and is passed straight into
+  `LlamaTokenizer.from_pretrained` / `LlamaForCausalLM.from_pretrained`, both of which accept a
+  local Hugging-Face-format directory directly.
+
 ## 12. VESSL run log
 
 Not run yet as of this writing (implementation phase, local Windows environment only). This

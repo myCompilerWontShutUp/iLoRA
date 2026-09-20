@@ -9,27 +9,55 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 echo "=== setup_vessl.sh ==="
-echo "[1/6] OS check"
+echo "[1/7] OS check"
 uname -a || echo "uname not available"
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "WARNING: this script is intended for the VESSL Linux instance; detected: $(uname -s)"
 fi
 
-echo "[2/6] Python check"
+echo "[2/7] Python check"
 python --version
 pip --version
 
-echo "[3/6] GPU/CUDA check (informational only; scripts/preflight_vessl.sh enforces the hard gate)"
+echo "[3/7] GPU/CUDA check (informational only; scripts/preflight_vessl.sh enforces the hard gate)"
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi || true
 else
     echo "WARNING: nvidia-smi not found. This is expected on a CPU-only box but not on the VESSL A100 instance."
 fi
 
-echo "[4/6] Installing dependencies from requirements.txt (pinned versions, no upgrades applied)"
+echo "[4/7] Installing dependencies from requirements.txt (pinned versions, no upgrades applied)"
 pip install -r requirements.txt
 
-echo "[5/6] Checking documented transformers debug-file workaround (README.md)"
+echo "[5/7] Import smoke test (transformers / pytorch_lightning / vendored PEFT)"
+# Importing model.peft transitively imports model/peft/tuners/moelora.py, which does
+# `if is_bnb_available(): import bitsandbytes` at module load time. is_bnb_available() only
+# checks that the bitsandbytes package is on disk (importlib.util.find_spec), not that its native
+# extension actually loads -- a common failure mode when bitsandbytes==0.37.2 (pinned in
+# requirements.txt) is paired with a newer/older CUDA toolkit than it expects. This experiment
+# never uses 8-bit/4-bit loading, so this failure is unrelated to anything this experiment
+# actually needs, but a broken bitsandbytes import here would otherwise crash `import main` (and
+# therefore every training/eval command) the first time it is run. Catch it here, before any GPU
+# rental time is spent on preflight or training.
+if ! python -c "
+import sys
+try:
+    import transformers
+    import pytorch_lightning
+    sys.path.insert(0, '.')
+    import model.peft
+    print('[import smoke test] OK: transformers, pytorch_lightning, model.peft all import cleanly.')
+except Exception as e:
+    print(f'[import smoke test] FAILED: {type(e).__name__}: {e}', file=sys.stderr)
+    sys.exit(1)
+"; then
+    echo "FATAL: a required import failed. See the traceback above (this is often bitsandbytes" >&2
+    echo "       failing to load its native extension against this machine's CUDA runtime, or" >&2
+    echo "       the transformers debug-file workaround below not yet being applied)." >&2
+    exit 1
+fi
+
+echo "[6/7] Checking documented transformers debug-file workaround (README.md)"
 # The upstream README documents that some environments need transformers/generation/utils.py and
 # transformers/models/llama/modeling_llama.py replaced with the debug/ versions shipped in this
 # repo. We only apply the replacement if the installed file's hash differs from what is already
@@ -64,7 +92,7 @@ else
     echo "WARNING: could not locate the installed transformers package; skipping debug-file check."
 fi
 
-echo "[6/6] Creating experiment output directories"
+echo "[7/7] Creating experiment output directories"
 mkdir -p checkpoints/baseline checkpoints/cluster_hard
 mkdir -p outputs/baseline outputs/cluster_hard
 mkdir -p results/baseline results/cluster_hard results/clustering

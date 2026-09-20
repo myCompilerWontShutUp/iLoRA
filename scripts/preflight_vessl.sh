@@ -41,6 +41,7 @@ echo "[pip] $(pip --version)"
 
 python - <<'PYEOF'
 import sys
+
 def show(name, getter):
     try:
         print(f"[{name}]", getter())
@@ -48,12 +49,29 @@ def show(name, getter):
         print(f"[{name}] NOT_RUN ({e})")
 
 show("torch version", lambda: __import__("torch").__version__)
-show("torch.cuda.is_available()", lambda: __import__("torch").cuda.is_available())
-show("torch.cuda.device_count()", lambda: __import__("torch").cuda.device_count())
 show("transformers version", lambda: __import__("transformers").__version__)
 show("peft (vendored model/peft) version", lambda: __import__("model.peft", fromlist=["__version__"]).__version__)
 show("pytorch_lightning version", lambda: __import__("pytorch_lightning").__version__)
 show("bitsandbytes version", lambda: __import__("bitsandbytes").__version__)
+
+# Hard gate: nvidia-smi succeeding only proves the driver sees a GPU, not that this specific
+# torch build can use it (requirements.txt pins torch==2.0.0 with no CUDA-build pin, so a
+# driver/runtime mismatch on the actual VESSL image would otherwise pass silently here and only
+# surface much later, mid-training, after real A100 time has been spent). Fail fast instead.
+import torch
+cuda_ok = torch.cuda.is_available()
+device_count = torch.cuda.device_count() if cuda_ok else 0
+print(f"[torch.cuda.is_available()] {cuda_ok}")
+print(f"[torch.cuda.device_count()] {device_count}")
+if not cuda_ok or device_count != 1:
+    print(
+        f"FATAL: torch does not see exactly 1 usable CUDA device "
+        f"(is_available={cuda_ok}, device_count={device_count}) even though nvidia-smi reported "
+        "exactly 1 GPU above. This usually means the installed torch build is incompatible with "
+        "the driver/CUDA runtime on this machine. Aborting before any training.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 PYEOF
 
 echo "[LLM_PATH] $LLM_PATH"
