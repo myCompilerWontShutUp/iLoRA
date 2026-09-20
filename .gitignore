@@ -1,0 +1,29 @@
+# Secrets / environment
+.env
+
+# Training outputs and checkpoints (spec section 16: never commit model weights/checkpoints)
+checkpoints/
+outputs/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Python
+__pycache__/
+*.pyc
+
+# Experiment tooling
+wandb/
+logs/
+.cache/
+
+# results/ and artifacts/ are intentionally NOT ignored: small CSV/JSON/Markdown/PNG results and
+# the small KMeans joblib artifact are meant to be committed for research-result preservation
+# (spec section 16 / section 20's final-deliverable file list explicitly includes them).
+# The raw SASRec representation dumps are the one exception: they are large (tens of MB at
+# MovieLens train-set scale) and fully regenerable from the committed dataset + rec_model
+# checkpoint via scripts/extract_representations.py, so they count as the "큰 결과 파일" spec
+# section 0.10 says not to commit.
+results/**/representations_*.npz
