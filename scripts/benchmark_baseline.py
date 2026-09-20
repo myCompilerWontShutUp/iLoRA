@@ -32,6 +32,17 @@ if REPO_ROOT not in sys.path:
 
 from model.model_interface import MInterface
 from data.data_interface import DInterface
+# Pickle compatibility, exactly mirroring main.py's top-level imports: rec_model/movielens.pt was
+# pickled with these classes resolvable as `__main__.SASRec` etc. (the module that happens to be
+# `__main__` when torch.load unpickles it). main.py gets this "for free" because it imports these
+# names at its own top level and is itself invoked as `__main__`; this script needs the identical
+# import here for the same reason, since it is a different `__main__` module. Without this,
+# MInterface.load_rec_model()'s torch.load(rec_model_path) fails with
+# AttributeError: module '__main__' has no attribute 'SASRec'. See
+# experiments/CODEBASE_ANALYSIS.md and experiments/IMPLEMENTATION_NOTES.md for why this script
+# duplicates a subset of main.py's imports instead of importing from main.py itself.
+from recommender.A_SASRec_final_bce_llm import SASRec, Caser, GRU  # noqa: F401
+from SASRecModules_ori import *  # noqa: F401,F403
 
 
 def build_args(cli_args):

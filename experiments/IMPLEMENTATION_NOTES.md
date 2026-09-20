@@ -318,6 +318,40 @@ from every `training_step`) would have hit as an `AttributeError` on the very fi
 by adding it. `capture_dir` is referenced by `save_gradients_to_file`, but that method is dead
 code (never called from anywhere, confirmed by `grep`), so it was correctly left out.
 
+## 11e. Fix: benchmark_baseline.py needs main.py's pickle-compatibility imports too (2026-09-21)
+
+Running `scripts/benchmark_baseline.py` for real on the VESSL A100 loaded Llama-2-7B successfully
+but then failed in `MInterface.load_rec_model()`'s `torch.load('./rec_model/movielens.pt', ...)`
+with `AttributeError: module '__main__' has no attribute 'SASRec'`.
+
+Root cause: `rec_model/movielens.pt` was pickled at a time when the `SASRec` class's
+`__module__` was `'__main__'` (i.e., whatever script defined/trained it was executed directly,
+so Python recorded its classes as belonging to `__main__` at pickle time — this is baked into
+the pickle bytes and cannot be changed by how anyone re-imports the class later). `torch.load`'s
+unpickler resolves class references by looking up `sys.modules['__main__'].<ClassName>`, so
+`SASRec` (and by the same mechanism, `Caser`/`GRU`) must be bound as attributes of whichever
+module is actually running as `__main__` at load time. `main.py` gets this for free because it
+does `from recommender.A_SASRec_final_bce_llm import SASRec, Caser, GRU` and
+`from SASRecModules_ori import *` at its own top level and is itself invoked as `__main__`.
+`scripts/extract_representations.py` already had the same property incidentally (it also imports
+`SASRec` at its own top level to call `cacul_h` directly), which is why it loaded the checkpoint
+successfully both on VESSL and in every local test in this file's earlier sections.
+`scripts/benchmark_baseline.py` did not import these names into its own top level, so when it
+runs as `__main__`, they weren't there.
+
+Fix (verified locally, see below): added
+`from recommender.A_SASRec_final_bce_llm import SASRec, Caser, GRU` and
+`from SASRecModules_ori import *` at the top of `scripts/benchmark_baseline.py`, in the same
+combination and order as `main.py`. `main.py`, `model/model_interface.py`, and
+`rec_model/movielens.pt` itself were not touched.
+
+Verified locally without needing a GPU: reproduced the exact `AttributeError: Can't get
+attribute 'SASRec' on <module '__main__' ...>` by running a standalone script that calls
+`torch.load('rec_model/movielens.pt', ...)` without importing `SASRec`, then confirmed that
+adding the same two import lines used above (as `__main__`-level imports) makes the identical
+`torch.load` call succeed, returning a real `SASRec` instance. `scripts/smoke_test_routing.py`'s
+full 17-check suite still passes.
+
 ## 12. VESSL run log
 
 Not run yet as of this writing (implementation phase, local Windows environment only). This
