@@ -263,6 +263,61 @@ left unmodified per the reviewer's instruction not to expand scope:
   `LlamaTokenizer.from_pretrained` / `LlamaForCausalLM.from_pretrained`, both of which accept a
   local Hugging-Face-format directory directly.
 
+## 11d. Benchmark/dry-run script and VESSL-verified setup fixes (2026-09-21)
+
+After the preflight review in §11c passed on the real VESSL A100 instance (`torch 2.0.0+cu117`,
+`transformers 4.28.0`, `pytorch_lightning 1.8.6`, conda env `ilora` / Python 3.10.21), three real
+environment problems were hit and fixed manually on the VESSL box before any training was
+started:
+
+1. The base/system Python on the VESSL image is 3.14, which cannot install `requirements.txt`
+   (pins like `torch==2.0.0` predate 3.14 wheel availability). Fixed manually with a dedicated
+   `conda create -n ilora python=3.10`.
+2. `requirements.txt` was missing `safetensors`, so the import smoke test added in §11c failed.
+   Fixed manually with `pip install safetensors==0.3.1`.
+3. `bitsandbytes==0.37.2` probed the system CUDA (12.8) instead of the `torch==2.0.0+cu117` build
+   actually installed, and failed to find a matching `libbitsandbytes_cuda128.so`. Fixed manually
+   by symlinking the pip-installed CUDA 11.7 runtime's `libcudart.so.11.0` to `libcudart.so` and
+   pointing `LD_LIBRARY_PATH` at the pip-installed `nvidia-*` lib directories, after which
+   bitsandbytes correctly detected CUDA 11.7 and loaded `libbitsandbytes_cuda117.so`.
+
+`setup_vessl.sh` was updated to automate exactly these three verified fixes (no broader
+environment handling was added):
+- A Python-version hard gate (`python -c 'import sys; print(...)'` compared against `3.10`)
+  right after the OS check, before `pip install` is attempted, so the failure mode in (1) is a
+  clear, early, actionable message instead of a confusing pip resolution failure.
+- `safetensors==0.3.1` added to `requirements.txt` directly, so (2) does not recur.
+- A new step, gated on `CONDA_PREFIX` being set *and* `torch.version.cuda == "11.7"` (so it only
+  ever fires in exactly the verified scenario), that creates the `libcudart.so` symlink if
+  missing and writes the `LD_LIBRARY_PATH` export into
+  `$CONDA_PREFIX/etc/conda/activate.d/ilora_bnb_cuda117.sh` (the standard conda mechanism for
+  environment variables that should be active whenever that env is active) — this makes the fix
+  from (3) persist across every future `conda activate ilora` and therefore across every
+  subsequent `bash scripts/preflight_vessl.sh` / `bash run_all_vessl.sh` invocation, without
+  needing to touch those other scripts at all.
+
+`scripts/benchmark_baseline.py` was added: a standalone dry-run that loads the model once and
+runs exactly 256 real training micro-batches under the released baseline's exact configuration
+(`routing_mode=dynamic`, `batch_size=8`, `accumulate_grad_batches=16`, `precision=16`, `seed=1234`,
+`num_moe=4`, `lora_r=8`), with validation/test/checkpointing/gate-export/analysis all disabled
+(`limit_val_batches=0`, `enable_checkpointing=False`, `callbacks=[]`, `logger=False`) and all
+output confined to `benchmark_runs/baseline_dry_run/` (gitignored), never touching
+`checkpoints/baseline`, `outputs/baseline`, `results/baseline`, or `logs/`. It prints
+model-loading time, 256-batch elapsed time, sec/batch, and the actual optimizer-step count as
+`[MEASURED]`, and a linear extrapolation to the real baseline's full 5-epoch run and to "baseline
++ cluster_hard at the same speed" as clearly separate `[ESTIMATED]` lines — this exists so the
+real per-batch speed on the actual rented A100 is known before committing to the two full
+5-epoch training runs `run_all_vessl.sh` would otherwise start blind.
+
+Building this script required duplicating a subset of `main.py`'s argparse defaults (main.py has
+no importable entry point and was intentionally left unmodified). Cross-referencing every
+`self.hparams.X` access in `model/model_interface.py` and every `kwargs['X']` access in
+`data/data_interface.py` against the benchmark script's constructed args caught one real bug
+before it could waste GPU time: `args.loss = 'lm'` was missing, which `configure_loss` (called
+from every `training_step`) would have hit as an `AttributeError` on the very first batch. Fixed
+by adding it. `capture_dir` is referenced by `save_gradients_to_file`, but that method is dead
+code (never called from anywhere, confirmed by `grep`), so it was correctly left out.
+
 ## 12. VESSL run log
 
 Not run yet as of this writing (implementation phase, local Windows environment only). This

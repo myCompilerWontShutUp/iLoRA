@@ -19,6 +19,9 @@ wandb/
 logs/
 .cache/
 
+# scripts/benchmark_baseline.py's throwaway dry-run directory (never a real experiment result)
+benchmark_runs/
+
 # results/ and artifacts/ are intentionally NOT ignored: small CSV/JSON/Markdown/PNG results and
 # the small KMeans joblib artifact are meant to be committed for research-result preservation
 # (spec section 16 / section 20's final-deliverable file list explicitly includes them).
