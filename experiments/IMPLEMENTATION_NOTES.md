@@ -352,6 +352,25 @@ adding the same two import lines used above (as `__main__`-level imports) makes 
 `torch.load` call succeed, returning a real `SASRec` instance. `scripts/smoke_test_routing.py`'s
 full 17-check suite still passes.
 
+## 11f. Paper-aligned-lr OOM check + per-batch memory diagnostics (2026-09-21)
+
+`scripts/benchmark_baseline.py` gained a `--lr` flag (default `8e-4`, unchanged from the released
+`train_movielens.sh` value) and a `BatchMemoryDiagnostics` `pl.Callback` that logs, at the start
+of every micro-batch, the batch's token length (max = common padded length, mean = actual
+non-padded length per sample) and `torch.cuda.memory_allocated/reserved/max_memory_allocated/
+max_memory_reserved`. `trainer.fit()` is wrapped in a `try/except RuntimeError` that recognizes a
+CUDA OOM message specifically, prints the last logged batch's diagnostics plus the raw CUDA error
+(which already contains PyTorch's own allocated/reserved/free breakdown), and exits cleanly
+instead of a raw traceback. This exists to check whether the OOM found in the forensic audit
+(see the audit report delivered in conversation, not checked into this file) reproduces at
+`--lr 1e-4` (the value stated in the paper's Appendix E for MovieLens, vs. the released script's
+`8e-4`) — since learning rate does not change activation/gradient tensor sizes, a reproduction at
+the same batch/memory point under a different lr would further confirm the OOM is a property of
+the released hyperparameters (batch size, sequence length, model size) and not lr-dependent, or
+anything introduced by this branch's own changes (already ruled out separately, see §6 of the
+forensic audit). No default in `main.py` or any `train_*.sh` script was changed; `--lr` on this
+one throwaway script is purely additive and opt-in.
+
 ## 12. VESSL run log
 
 Not run yet as of this writing (implementation phase, local Windows environment only). This
