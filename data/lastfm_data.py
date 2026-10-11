@@ -8,7 +8,7 @@ import pandas as pd
 import random
 
 class LastfmData(data.Dataset):
-    def __init__(self, data_dir=r'data/ref/lastfm_ctr',
+    def __init__(self, data_dir=r'data/ref/lastfm',
                  stage=None,
                  cans_num=10,
                  sep=", ",
@@ -43,7 +43,8 @@ class LastfmData(data.Dataset):
 
     def negative_sampling(self,seq_unpad,next_item):
         canset=[i for i in list(self.item_id2name.keys()) if i not in seq_unpad and i!=next_item]
-        candidates=random.sample(canset, 1)
+        candidates=random.sample(canset, self.cans_num-1)+[next_item]
+        random.shuffle(candidates)
         return candidates
 
     def check_files(self):

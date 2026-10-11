@@ -152,13 +152,10 @@ class DInterface(pl.LightningDataModule):
                           collate_fn=TrainCollater(prompt_list=self.prompt_list,llm_tokenizer=self.llm_tokenizer,train=False))
 
     def test_dataloader(self):
-        return DataLoader(self.testset, 
-                          batch_size=self.batch_size, 
-                          num_workers=self.num_workers, 
+        return DataLoader(self.testset,
+                          batch_size=self.batch_size,
+                          num_workers=self.num_workers,
                           shuffle=False,
-                          
-                          drop_last=True,
-                          
                           collate_fn=TrainCollater(prompt_list=self.prompt_list,llm_tokenizer=self.llm_tokenizer,train=False))
 
     def load_data_module(self):

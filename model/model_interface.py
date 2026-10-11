@@ -184,6 +184,14 @@ class MInterface(pl.LightningModule):
 
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
 
+        # Raw counts recovered exactly from calculate_hr1's ratios (valid=valid_ratio*total,
+        # correct=hr*valid are integers). They allow both HR conventions to be compared: the
+        # released code's correct/valid, and correct/total, the only convention under which the
+        # LLaRA paper's numbers (copied into iLoRA Table 1) have an integer solution.
+        total_num = len(self.test_content["generate"])
+        valid_num = round(prediction_valid_ratio * total_num)
+        correct_num = round(hr * valid_num)
+
         metrics = {
             'git_commit_hash': commit_hash,
             'seed': self.hparams.seed,
@@ -201,6 +209,10 @@ class MInterface(pl.LightningModule):
             'test_prediction_valid': prediction_valid_ratio,
             'test_hr': hr,
             'metric': metric,
+            'test_total_num': total_num,
+            'test_valid_num': valid_num,
+            'test_correct_num': correct_num,
+            'test_hr_over_total': correct_num / total_num if total_num else 'NOT_RUN',
             'elapsed_seconds': elapsed_seconds,
             'gpu_model': gpu_model,
             'torch_version': torch.__version__,
