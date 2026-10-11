@@ -747,12 +747,6 @@ class Linear(nn.Linear, MoeLoraLayer):
             )
             self.merged = False
     
-    def calculate_B(self, A_out):
-        batch_size, seq_len, n, r = A_out.size()
-        weight = self.lora_B[self.active_adapter].weight.t().reshape(n, r, -1)
-        return torch.einsum('ijkl, klm->ijkm', A_out, weight)
-
-
     def forward(self, x: torch.Tensor, **kwargs):
         flag = False
         # user_embeds = self.global_user_embeds[0]
@@ -774,27 +768,29 @@ class Linear(nn.Linear, MoeLoraLayer):
                 A_out = self.lora_A[self.active_adapter](
                             self.lora_dropout[self.active_adapter](x)
                             ).reshape(batch_size, seq_len, self.num_moe[self.active_adapter], -1)
-                B_out = self.calculate_B(A_out)
-                
+
                 # Gate = self.gating[self.active_adapter](user_embeds).unsqueeze(-1)
                 Gate = gate_weights.unsqueeze(-1)
-                
-                
-                result += ((B_out * Gate).sum(dim=-2) * self.scaling[self.active_adapter])
-                
-                
-                gate_weights_squeezed = Gate.squeeze(-1)  
-                gate_weights_split = gate_weights_squeezed.split(1, dim=0) 
-                gate_weight_vectors = [x.squeeze() for x in gate_weights_split] 
-                        
+
+                # sum_k Gate_k * B_k(A_k x) == lora_B(concat_k Gate_k * A_k x): gating the rank-r/K
+                # expert chunks of A_out before one lora_B matmul is algebraically identical to the
+                # upstream einsum + (B_out * Gate).sum(-2), but never materializes the
+                # [batch, seq, num_moe, out_features] tensor that upstream kept for backward in every
+                # target module of every layer (the dominant activation cost behind the A100 80GB OOM).
+                gated_A_out = (A_out * Gate).reshape(batch_size, seq_len, -1)
+                result += self.lora_B[self.active_adapter](gated_A_out) * self.scaling[self.active_adapter]
+
             else:
                 result = F.linear(x, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
-            
+
             result = result.to(previous_dtype)
 
             return result
         except Exception as e:
+            # A CUDA OOM must surface; returning zeros would silently corrupt the forward pass.
+            if "out of memory" in str(e).lower():
+                raise
             print(f"An error occurred: {e}")
             return torch.zeros_like(x)  # 返回一个与输入张量相同形状的全零张量
 

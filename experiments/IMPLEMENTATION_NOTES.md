@@ -371,6 +371,132 @@ anything introduced by this branch's own changes (already ruled out separately, 
 forensic audit). No default in `main.py` or any `train_*.sh` script was changed; `--lr` on this
 one throwaway script is purely additive and opt-in.
 
+## 11g. Dataset alignment with the paper, and OOM root cause (2026-10-11)
+
+### What the paper actually specifies for the data
+
+iLoRA (arXiv:2408.10159v4, §4): "We request the dataset from LLaRA [9] and maintain exactly the
+same experimental settings as described in the original paper. Our study builds upon the main
+table from the LLaRA paper, using the results reported in the LLaRA paper directly." The data
+definition therefore lives in LLaRA (arXiv:2312.02445, §5.1.1 and Table 1): MovieLens100K; Steam
+filtered to users with >= 20 reviews then 1/3 of users and games; chronological 8:1:1
+train/val/test split; last 10 interactions kept as history (padded); 20 candidates per sequence
+including the correct next item; dataset statistics #Sequence 943 / 11,938 / 1,220 and
+#Item 1,682 / 3,581 / 4,606 (MovieLens / Steam / LastFM).
+
+### Provenance check of `data/ref` against LLaRA's official release
+
+LLaRA's README points to https://huggingface.co/datasets/joyliao7777/LLaRA. Comparing git blob
+ids / sha256 of the committed files with that release:
+
+| file | vs LLaRA release |
+|---|---|
+| lastfm: train, Val, Test, id2name | identical |
+| movielens: Val, Test, u.item | identical |
+| movielens: train_data.df | different bytes, but `seq`, `len_seq`, `next` and the index are identical row-for-row (68,388 rows); iLoRA's copy only adds an int `cluster` column (4 clusters) that no code reads |
+| steam: train, Test, id2name | identical to LLaRA's 2024-05-04 Steam update |
+| steam: Val_data.df | **missing from iLoRA** (without it Steam training cannot start: `DInterface` loads the val split eagerly) |
+
+Against LLaRA Table 1, MovieLens (754 train users + 94 val + 95 test = 943, 1,682 items) and LastFM
+(976 + 122 + 122 = 1,220, 4,606 items) match exactly, with an 8:1:1 split. Steam val/test are
+1,194 each (= 10% of 11,938).
+
+### Changes applied to match the paper (= LLaRA's protocol and LLaRA's own code)
+
+- `data/lastfm_data.py`: `negative_sampling` restored to LLaRA's
+  `random.sample(canset, cans_num-1) + [next_item]` + shuffle. iLoRA had changed it to
+  `random.sample(canset, 1)`, which never contains the ground truth (verified 0/122 on the real
+  test set), so HR@1 was structurally 0. Default `data_dir` restored from `lastfm_ctr` to
+  `lastfm`. Now 20 candidates with the ground truth in 122/122 val and test sequences.
+- `data/data_interface.py`: removed `drop_last=True` from `test_dataloader` (not in LLaRA). With
+  batch_size 8 it silently dropped 7 of 95 MovieLens test sequences; the paper's protocol is
+  "across all sequences".
+- `data/ref/steam/Val_data.df`: added from the LLaRA release (git blob
+  `358a8631f8d76a6c67670c4ec0268c16c106bf59`, matching the HF-reported oid and the same release
+  as the committed Steam train/test).
+- `metrics.json` now also records `test_total_num`, `test_valid_num`, `test_correct_num` and
+  `test_hr_over_total` (counts recovered exactly from `calculate_hr1`'s ratios; verified on 2.2M
+  integer triples). The original `test_hr` (correct/valid) is unchanged.
+
+Left unchanged deliberately: the `len_seq >= 3` filter (present in LLaRA's code too; it removes no
+MovieLens/LastFM val/test rows), and `prompt/artist.txt`'s "10 music artist names" (identical in
+LLaRA's prompt; the paper shows no prompt text).
+
+### What the paper's own numbers imply about evaluation
+
+Searching integer (N, valid, correct) with N <= the full test size:
+- iLoRA MovieLens 0.9891 / 0.5275 has exactly one solution: N=92, valid=91, correct=48, with
+  HR = correct/valid. 92 = 95 with `drop_last` at batch size 4.
+- LLaRA MovieLens 0.9684 / 0.4421 (and TALLRec 0.9263 / 0.3895, LLaRA-GRU4Rec LastFM) have
+  exactly one solution each: the full test set with HR = correct/total.
+So iLoRA Table 1 places an HR computed as correct/valid on 92 sequences next to LLaRA HRs computed
+as correct/total on all 95. Under one convention iLoRA's MovieLens HR would be 48/92 = 0.5217
+(correct/total) — this is an inference from the reported digits, not something the paper states.
+
+Corrections to the earlier forensic audit: (1) the "five random seeds" sentence (iLoRA App. E,
+LLaRA §5.1.2) sits in the conventional-baseline paragraph, so it does not establish that iLoRA's
+own rows are 5-seed averages (the MovieLens row is consistent with a single run); (2) LLaRA's
+paper reports LLaRA (SASRec) LastFM HR@1 = 0.4508, so in the inconsistent LastFM/LLaRA cell it is
+the 8.51% Imp. that disagrees, not the HR; (3) iLoRA's "ChatRec" row is numerically LLaRA's
+"GPT-4" row.
+
+### OOM root cause (training, MovieLens, A100 80GB)
+
+- Real Llama-2 tokenizer on the TrainCollater prompts: padded batch length L has mean 272,
+  p90 288, p97 ~296, max 322.
+- The failed request, 148.00 MiB = 155,189,248 B = 8 x 296 x 4 x 4096 x 4 B: exactly one fp32
+  `[batch=8, L=296, num_moe=4, 4096]` tensor, i.e. `B_out * Gate` (or its gradient) of a
+  4096-wide MoE-LoRA target module. No other tensor shape in the model factors to this size with
+  a plausible L.
+- Upstream `moelora.Linear.forward` builds `B_out = einsum(A_out, B)` of shape
+  `[B, L, num_moe, out_features]` in every target module of every layer and keeps it for
+  backward (needed for the gradient w.r.t. the gate). Measured with saved-tensor hooks on the
+  real upstream class: 803 KiB/token/layer saved by the LoRA branch vs 139 KiB/token/layer for an
+  algebraically identical form, lora_B((A_out * Gate).reshape(B, L, r)). At B=8, L=296, 32
+  layers that is roughly 25 GiB of fp16 activations on the GPU.
+- Typical batches (L ~ 272) fit just under 80 GB; a p97 batch (L ~ 296) does not. Over 37 batches
+  the chance of meeting one is ~70%, matching an OOM at batch 37.
+
+Fix status: APPLIED to `model/peft/tuners/moelora.py` (`Linear.forward` only):
+- the LoRA branch computes `lora_B((A_out * Gate).reshape(B, L, r)) * scaling` instead of
+  `einsum` -> `B_out` -> `(B_out * Gate).sum(-2) * scaling`; the now-unused `Linear.calculate_B`
+  is removed (the 8-bit class keeps its own copy, untouched);
+- the `except Exception` that turns any error into `torch.zeros_like(x)` now re-raises CUDA OOM,
+  so an OOM can no longer silently zero a projection and keep training; every other exception
+  keeps the upstream behavior.
+`scripts/test_moelora_equivalence.py` loads the upstream file from git (28e4737) next to the
+working-tree file and checks, with identical weights: outputs and gradients w.r.t. x, gate,
+lora_A, lora_B agree (float64 ~1e-16, float32 ~1e-7, also with lora_dropout=0.1 and a
+single-token generation step); saved-for-backward bytes drop by exactly the upstream B_out
+tensor; an OOM propagates while other errors still return zeros.
+
+### Will it fit on the A100 80GB? (measured, not estimated from formulas)
+
+The repo's `debug/modeling_llama.py` decoder layer with real dimensions and the real MoE-LoRA
+modules was run on CPU with the GPU's dtype flow (bf16 base weights, fp16 autocast; CUDA
+autocast's fp32 cross_entropy and its non-intervention in `torch.cat` reproduced), and peak
+memory was tracked op-by-op with `torch.distributed._tools.mem_tracker.MemTracker` for
+K in {1,2,3} layers and batch 1/2 at L in {296, 322, 350}. A linear model in layers and batch
+size predicts all independent K=1 runs exactly, giving per layer: 0.378 GiB constant (the fp16
+autocast copies of the frozen bf16 weights, = 202.4M params x 2 B) plus, per sample,
+0.213 GiB (upstream) vs 0.119 GiB (rewrite) of activations at L=296 — the difference is exactly
+the fp16 B_out tensor. Static memory (exact parameter counts: bf16 base, fp32 LoRA/projector/
+router, fp32 gradients, Adam states, rotary caches) is 13.23 GiB. Calibrating to the observed
+OOM (36 batches passed, failed at L~296 with 76.12 GiB allocated; the model over-predicts
+activations by 9.4%) and using the full 5-epoch length distribution (41,325 simulated batches
+with fresh negatives each epoch; padded L mean 273, p99.9 325, max 347):
+
+| | typical batch (L=272) | longest batch of a 5-epoch run (L=347) | batches over the ~76.1 GiB budget |
+|---|---|---|---|
+| upstream moelora | 71.7 GiB | 86.2 GiB | 2,221 / 41,325 |
+| rewritten moelora (repo) | 51.7 GiB | 60.7 GiB (64.2 uncalibrated) | 0 / 41,325 |
+
+Re-running the same measurement with the repo's working-tree moelora.py reproduces the
+pre-application numbers to four decimals. Validation/test generation (KV cache ~1.7 GB) and
+cluster_hard training (the one-hot gate needs no gradient, so B_out was never kept there) are
+below the training peak. Final confirmation is a GPU run of `scripts/benchmark_baseline.py`,
+whose per-batch log should show roughly 50-55 GiB at L ~ 270-300.
+
 ## 12. VESSL run log
 
 Not run yet as of this writing (implementation phase, local Windows environment only). This
