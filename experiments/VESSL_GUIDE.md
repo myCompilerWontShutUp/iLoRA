@@ -8,6 +8,10 @@
   it is not used. The Managed image's own Python/CUDA versions do not matter: everything runs in a
   dedicated conda env with Python 3.10 and the pinned `torch==2.0.0` (CUDA 11.7) wheel.
 - Disk: about 100 GB. Keep the Llama-2 weights on persistent storage if the workspace offers it.
+- Pausing or stopping the workspace recreates the container: everything outside a mounted volume
+  (repository, conda env, weights, checkpoints, logs) is lost. Stop a run with
+  `tmux kill-session -t ilora` instead, and copy `results/`, `artifacts/` and `logs/` out before
+  pausing.
 
 ## Commands
 
@@ -47,9 +51,28 @@ bash run_all_vessl.sh
 ```
 
 Detach with `Ctrl-b d`, re-attach with `tmux attach -t ilora`. Re-running `run_all_vessl.sh`
-skips finished stages; `FORCE=1` redoes them. At 2.04 s per micro-batch (measured before the
-MoE-LoRA memory fix) one 5-epoch training run is about 23 hours, so baseline + cluster_hard take
-about two days; the benchmark in step 7 prints the current estimate.
+skips finished stages; `FORCE=1` redoes them. After the MoE-LoRA memory fix the first VESSL run
+trained at about 1.38 micro-batches/s (about 1 h 40 min per epoch, about 8.5 h per 5-epoch
+training); the benchmark in step 7 prints the current estimate.
+
+## If the training loss becomes NaN
+
+The first full baseline run on VESSL (fp16 AMP, lr 8e-4, as in the released scripts) showed
+`loss=nan` for the whole second epoch and 0 valid predictions at the first validation. Stop such a
+run (`tmux kill-session -t ilora`): it does not recover. Then, in the conda env:
+
+```bash
+python scripts/diagnose_nan.py --llm_path "$LLM_PATH"                    # same config as the run
+python scripts/diagnose_nan.py --llm_path "$LLM_PATH" --precision bf16   # candidate fix
+```
+
+Each run trains the baseline configuration with the full-run LR schedule until 48 micro-batches
+after the first non-finite loss (or one epoch, about 2 h at most) and writes
+`benchmark_runs/nan_diag/<config>/summary.json` plus per-micro-batch and per-optimizer-step CSVs.
+The summary names the module that first produced inf/NaN, whether the parameters were still
+finite, and whether GradScaler skipped every later step (fp16 overflow leaves the run stuck at
+fixed parameters). `--precision bf16` matches the dtype the weights are loaded in and LLaRA's
+default; whether the full run should switch is decided from these two summaries.
 
 ## Running baseline and cluster_hard in parallel (two workspaces, about one day instead of two)
 
