@@ -113,40 +113,34 @@ except Exception as e:
     exit 1
 fi
 
-echo "[7/8] Checking documented transformers debug-file workaround (README.md)"
-# The upstream README documents that some environments need transformers/generation/utils.py and
-# transformers/models/llama/modeling_llama.py replaced with the debug/ versions shipped in this
-# repo. We only apply the replacement if the installed file's hash differs from what is already
-# installed AND from what we'd be replacing it with, and we always log the decision instead of
-# silently overwriting a package file. See experiments/IMPLEMENTATION_NOTES.md section 10.
-TRANSFORMERS_DIR="$(python -c 'import os, transformers; print(os.path.dirname(transformers.__file__))' 2>/dev/null || true)"
-NOTES_FILE="experiments/IMPLEMENTATION_NOTES.md"
-if [[ -n "$TRANSFORMERS_DIR" ]]; then
-    GEN_UTILS="$TRANSFORMERS_DIR/generation/utils.py"
-    MODELING_LLAMA="$TRANSFORMERS_DIR/models/llama/modeling_llama.py"
-    for pair in "debug/utils.py:$GEN_UTILS" "debug/modeling_llama.py:$MODELING_LLAMA"; do
-        SRC="${pair%%:*}"
-        DST="${pair##*:}"
-        if [[ -f "$DST" ]]; then
-            if ! cmp -s "$SRC" "$DST"; then
-                echo "INFO: $DST differs from $SRC. Not overwriting automatically."
-                echo "      If you hit the error documented in README.md for this file, copy it manually:"
-                echo "      cp $SRC $DST"
-                {
-                    echo ""
-                    echo "### setup_vessl.sh dependency note ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-                    echo "- $DST differs from $SRC; not auto-replaced. See README.md for the documented workaround."
-                } >> "$NOTES_FILE"
-            else
-                echo "INFO: $DST already matches $SRC, no action needed."
-            fi
-        else
-            echo "INFO: $DST not found (transformers layout may differ); skipping."
-        fi
-    done
-else
-    echo "WARNING: could not locate the installed transformers package; skipping debug-file check."
+echo "[7/8] Applying the transformers source patches this repository requires (README.md)"
+# debug/modeling_llama.py adds **kwargs to LlamaForCausalLM.forward and debug/utils.py allow-lists
+# user_embeds/gate_weights in GenerationMixin._validate_model_kwargs. Vanilla transformers 4.28.0
+# rejects those kwargs, so without both files training fails and every validation/test generate()
+# raises ValueError (the training-only benchmark never reaches generate()). Originals are kept
+# once as *.orig; re-running is a no-op.
+TRANSFORMERS_DIR="$(python -c 'import os, transformers; print(os.path.dirname(transformers.__file__))')"
+TRANSFORMERS_VERSION="$(python -c 'import transformers; print(transformers.__version__)')"
+if [[ "$TRANSFORMERS_VERSION" != "4.28.0" ]]; then
+    echo "FATAL: debug/*.py were written for transformers 4.28.0, found $TRANSFORMERS_VERSION." >&2
+    exit 1
 fi
+for pair in "debug/utils.py:generation/utils.py" "debug/modeling_llama.py:models/llama/modeling_llama.py"; do
+    SRC="${pair%%:*}"
+    DST="$TRANSFORMERS_DIR/${pair##*:}"
+    if cmp -s "$SRC" "$DST"; then
+        echo "  $DST already patched."
+    else
+        [[ -f "$DST.orig" ]] || cp "$DST" "$DST.orig"
+        cp "$SRC" "$DST"
+        echo "  patched $DST (original kept as $DST.orig)"
+    fi
+done
+if ! grep -q "'user_embeds', 'gate_weights'" "$TRANSFORMERS_DIR/generation/utils.py"; then
+    echo "FATAL: generation/utils.py does not allow-list user_embeds/gate_weights after patching." >&2
+    exit 1
+fi
+python -c "import transformers.generation.utils; from transformers import LlamaForCausalLM, LlamaTokenizer; print('  patched transformers imports OK')"
 
 echo "[8/8] Creating experiment output directories"
 mkdir -p checkpoints/baseline checkpoints/cluster_hard

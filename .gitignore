@@ -17,6 +17,7 @@ __pycache__/
 # Experiment tooling
 wandb/
 logs/
+log/
 .cache/
 
 # scripts/benchmark_baseline.py's throwaway dry-run directory (never a real experiment result)

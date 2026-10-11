@@ -497,6 +497,21 @@ cluster_hard training (the one-hot gate needs no gradient, so B_out was never ke
 below the training peak. Final confirmation is a GPU run of `scripts/benchmark_baseline.py`,
 whose per-batch log should show roughly 50-55 GiB at L ~ 270-300.
 
+## 11h. Fresh-workspace bootstrap (2026-10-11)
+
+- `setup_vessl.sh` step 7 now applies `debug/utils.py` and `debug/modeling_llama.py` to the
+  installed transformers 4.28.0 (originals kept once as `*.orig`, idempotent, verified by the
+  `user_embeds`/`gate_weights` allow-list and a patched import), replacing the earlier
+  detect-and-log behavior of §10. The forensic audit showed both files are required: the earlier
+  VESSL session applied only `modeling_llama.py`, which is enough for the training-only benchmark
+  but would have failed at the first validation `generate()`.
+- `bootstrap_vessl.sh` prepares a fresh workspace end to end (conda env, optional Llama-2 download
+  from `HF_TOKEN`, setup, preflight, CPU regression test, GPU evaluation smoke test on the test
+  split, GPU training-memory benchmark) and prints, but does not start, the full run.
+- Image: VESSL requires SSHD in custom images; `pytorch/pytorch:2.0.0-cuda11.7-cudnn8-devel` has
+  none (its official Dockerfile stage installs only ca-certificates/libjpeg/libpng/gcc), so a
+  Managed image + the conda env is used, as in the earlier working session.
+
 ## 12. VESSL run log
 
 Not run yet as of this writing (implementation phase, local Windows environment only). This
