@@ -36,9 +36,13 @@ echo "[1/7] Preflight"
 LLM_PATH="$LLM_PATH" DATA_DIR="$DATA_DIR" PREFLIGHT_OUTPUT_DIR="$OUTPUT_DIR" bash scripts/preflight_vessl.sh
 
 echo "[2/7] Baseline training (routing_mode=dynamic)"
-if [[ -f "$CKPT_DIR/last.ckpt" && "$FORCE" != "1" ]]; then
-    echo "  $CKPT_DIR/last.ckpt already exists; skipping training (set FORCE=1 to retrain)."
+# last.ckpt is rewritten after every epoch, so it also exists after a crash mid-run; only a
+# marker written after main.py exits successfully means the 5-epoch run actually finished.
+if [[ -f "$CKPT_DIR/TRAINING_COMPLETE" && "$FORCE" != "1" ]]; then
+    echo "  $CKPT_DIR/TRAINING_COMPLETE exists; skipping training (set FORCE=1 to retrain)."
 else
+    rm -f "$CKPT_DIR/TRAINING_COMPLETE"
+    TRAINED_NOW=1
     START=$(date +%s)
     python main.py \
         --mode train \
@@ -65,9 +69,13 @@ else
         --seed "$SEED"
     END=$(date +%s)
     echo "  training elapsed: $((END - START))s"
+    touch "$CKPT_DIR/TRAINING_COMPLETE"
 fi
 
 echo "[3/7] Baseline evaluation (--export_gates writes gates_test.csv as part of this step)"
+if [[ "${TRAINED_NOW:-0}" == "1" ]]; then
+    rm -f "$RESULTS_DIR/metrics.json"  # a model trained in this run must be evaluated again
+fi
 if [[ -f "$RESULTS_DIR/metrics.json" && "$FORCE" != "1" ]]; then
     echo "  $RESULTS_DIR/metrics.json already exists; skipping evaluation (set FORCE=1 to re-evaluate)."
 else

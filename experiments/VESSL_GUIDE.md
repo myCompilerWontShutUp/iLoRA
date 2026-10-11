@@ -51,6 +51,25 @@ skips finished stages; `FORCE=1` redoes them. At 2.04 s per micro-batch (measure
 MoE-LoRA memory fix) one 5-epoch training run is about 23 hours, so baseline + cluster_hard take
 about two days; the benchmark in step 7 prints the current estimate.
 
+## Running baseline and cluster_hard in parallel (two workspaces, about one day instead of two)
+
+cluster_hard does not depend on the baseline training: its clusters come from the frozen SASRec
+representations, which `run_cluster_hard_movielens.sh` extracts itself. Total GPU hours are the
+same; each workspace still uses exactly one GPU.
+
+- Workspace A: `bash bootstrap_vessl.sh`, then in tmux `bash run_baseline_movielens.sh`.
+- Workspace B (start after A's bootstrap passed): `SKIP_GPU_CHECKS=1 bash bootstrap_vessl.sh`,
+  then in tmux `bash run_cluster_hard_movielens.sh`.
+- When B finishes: `tar czf cluster_hard_results.tgz results/clustering results/cluster_hard artifacts logs`,
+  copy the archive into the repository on A, `tar xzf cluster_hard_results.tgz`, and once A has
+  finished too run `bash merge_parallel_results.sh` on A (CPU only; re-runs the clustering analysis
+  with the baseline gates, then the final comparison and summary). Workspace B can be terminated
+  as soon as the archive is copied.
+
+A stage is skipped on re-run only if it really finished: training writes
+`checkpoints/<run>/TRAINING_COMPLETE` when `main.py` exits successfully (`last.ckpt` alone is
+not trusted, it also exists after a crash), and a freshly trained model is always re-evaluated.
+
 ## Where results land
 
 - `results/baseline/metrics.json`, `gates_test.csv`, `gate_summary.json`, `figures/*.png`

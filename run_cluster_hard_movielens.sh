@@ -79,9 +79,13 @@ else
 fi
 
 echo "[5/7] Cluster-hard training (from scratch; routing_mode=cluster_hard)"
-if [[ -f "$CKPT_DIR/last.ckpt" && "$FORCE" != "1" ]]; then
-    echo "  $CKPT_DIR/last.ckpt already exists; skipping training (set FORCE=1 to retrain)."
+# last.ckpt is rewritten after every epoch, so it also exists after a crash mid-run; only a
+# marker written after main.py exits successfully means the 5-epoch run actually finished.
+if [[ -f "$CKPT_DIR/TRAINING_COMPLETE" && "$FORCE" != "1" ]]; then
+    echo "  $CKPT_DIR/TRAINING_COMPLETE exists; skipping training (set FORCE=1 to retrain)."
 else
+    rm -f "$CKPT_DIR/TRAINING_COMPLETE"
+    TRAINED_NOW=1
     python main.py \
         --mode train \
         --router share \
@@ -108,9 +112,13 @@ else
         --lr_decay_min_lr 8e-6 \
         --max_epochs 5 \
         --seed "$SEED"
+    touch "$CKPT_DIR/TRAINING_COMPLETE"
 fi
 
 echo "[6/7] Cluster-hard evaluation"
+if [[ "${TRAINED_NOW:-0}" == "1" ]]; then
+    rm -f "$RESULTS_DIR/metrics.json"  # a model trained in this run must be evaluated again
+fi
 if [[ -f "$RESULTS_DIR/metrics.json" && "$FORCE" != "1" ]]; then
     echo "  $RESULTS_DIR/metrics.json already exists; skipping evaluation (set FORCE=1 to re-evaluate)."
 else
