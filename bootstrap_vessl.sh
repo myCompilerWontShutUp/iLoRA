@@ -8,7 +8,8 @@
 #   [1/7] tmux                       (installed with apt when missing and running as root)
 #   [2/7] conda env `ilora`, Python 3.10 (Miniforge is installed when no conda exists)
 #   [3/7] Llama-2-7b-hf weights      (downloaded with $HF_TOKEN only if $LLM_PATH is empty)
-#   [4/7] setup_vessl.sh             (pinned requirements, bitsandbytes CUDA 11.7, transformers patches)
+#   [4/7] setup_vessl.sh             (pinned requirements, bitsandbytes on torch's CUDA 11.7 runtime,
+#                                     transformers patches), then a bitsandbytes check in a re-activated env
 #   [5/7] preflight + CPU regression test of the MoE-LoRA rewrite
 #   [6/7] GPU: evaluation path smoke test (generate, gate export, metrics.json) on the test split
 #   [7/7] GPU: 256-batch training memory benchmark
@@ -94,6 +95,7 @@ fi
 echo "[4/7] setup_vessl.sh"
 bash setup_vessl.sh
 set +u; conda deactivate; conda activate "$ENV_NAME"; set -u   # pick up the bitsandbytes LD_LIBRARY_PATH hook
+python scripts/verify_bnb_cuda.py   # again after a fresh activation: the hook alone must be enough
 
 echo "[5/7] preflight + CPU regression test"
 bash scripts/preflight_vessl.sh

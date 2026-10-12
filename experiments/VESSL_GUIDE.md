@@ -30,9 +30,10 @@ bash bootstrap_vessl.sh
 3. downloads `meta-llama/Llama-2-7b-hf` (json, safetensors, tokenizer) into `$LLM_PATH` if it is
    not there; the HF account needs access to that gated repo. The token is read from `HF_TOKEN`
    only and is not written anywhere in the repository;
-4. runs `setup_vessl.sh`: pinned requirements, the bitsandbytes CUDA 11.7 library path, and the
-   two transformers source patches from `debug/` (required: without `debug/utils.py` every
-   validation/test `generate()` fails);
+4. runs `setup_vessl.sh`: pinned requirements, bitsandbytes on torch's CUDA 11.7 runtime (below),
+   and the two transformers source patches from `debug/` (required: without `debug/utils.py`
+   every validation/test `generate()` fails); then re-activates the env and runs
+   `scripts/verify_bnb_cuda.py` again, so the activation hook alone is shown to be enough;
 5. runs `scripts/preflight_vessl.sh` and `scripts/test_moelora_equivalence.py`;
 6. GPU smoke test of the evaluation path on the untrained model: expects all 95 MovieLens test
    sequences evaluated and 95 rows in `gates_test.csv` (outputs under `benchmark_runs/`);
@@ -40,6 +41,26 @@ bash bootstrap_vessl.sh
    `max_memory_allocated` (expected roughly 50-55 GiB) and a time estimate for the full run.
 
 `SKIP_GPU_CHECKS=1 bash bootstrap_vessl.sh` stops after step 5.
+
+### bitsandbytes and the image's CUDA 12.8
+
+The image ships CUDA 12.8 in `/usr/local/cuda` (also on its `LD_LIBRARY_PATH`); torch 2.0.0+cu117
+uses its own CUDA 11.7 runtime from the `nvidia-*` pip wheels. bitsandbytes 0.37.2 takes the first
+`libcudart.so` it finds (`$CONDA_PREFIX/lib`, then the `LD_LIBRARY_PATH` directories, picked in
+arbitrary order when several match, then `/usr/local/cuda/lib64`) and loads
+`libbitsandbytes_cuda<that version>.so`. Picking the 12.8 runtime made it look for
+`libbitsandbytes_cuda128.so`, which 0.37.2 does not ship, and the import failed.
+
+`scripts/setup_bnb_cuda_runtime.sh` (called by `setup_vessl.sh`, safe to re-run) derives the
+version from `torch.version.cuda`, links the wheel's `libcudart.so.11.0` as
+`$CONDA_PREFIX/lib/libcudart.so` (checked first, so the system CUDA is never reached), and writes
+`$CONDA_PREFIX/etc/conda/{activate,deactivate}.d/ilora_bnb_cuda.sh`, which put the `nvidia-*` lib
+directories first on `LD_LIBRARY_PATH` on every `conda activate ilora` (new terminals and tmux
+included) and restore it on deactivate. `$CONDA_PREFIX/lib` itself is not put on
+`LD_LIBRARY_PATH`, so system tools such as tmux keep working. `scripts/verify_bnb_cuda.py` checks
+torch 2.0.0 / CUDA 11.7, the GPU, the runtime bitsandbytes picks, and that
+`libbitsandbytes_cuda117.so` is the binary actually loaded. Nothing is compiled; the pinned
+torch 2.0.0+cu117 / bitsandbytes 0.37.2 stay as they are.
 
 Then start the experiment in tmux (the exact command is printed at the end of the bootstrap):
 
