@@ -154,6 +154,9 @@ unverified in this pass — no network fetch of the paper was performed; this do
 implementation since the released-script values are used regardless of the outcome of that
 comparison.
 
+**Superseded for the peak lr, see section 11i:** the run scripts now use the paper's `lr=1e-4`;
+every other value above is unchanged.
+
 ## 9. Known, documented (not fixed) confounder
 
 Per `CODEBASE_ANALYSIS.md` §T/U and spec §13: with `lora_r=8, num_moe=4`, each expert has
@@ -511,6 +514,29 @@ whose per-batch log should show roughly 50-55 GiB at L ~ 270-300.
 - Image: VESSL requires SSHD in custom images; `pytorch/pytorch:2.0.0-cuda11.7-cudnn8-devel` has
   none (its official Dockerfile stage installs only ca-certificates/libjpeg/libpng/gcc), so a
   Managed image + the conda env is used, as in the earlier working session.
+
+## 11i. Peak learning rate: the paper's 1e-4 instead of the released 8e-4 (2026-10-12)
+
+The released `train_movielens.sh` uses `--lr 8e-4` (warmup start and floor 8e-6); the paper's
+Appendix E states a maximum learning rate of 1e-4 for MovieLens and Steam (2e-4 for LastFM), with
+warmup, cosine annealing and mixed precision. The paper gives no warmup start, floor, batch size,
+epoch count or LoRA rank, so those keep the released values.
+
+Evidence on the VESSL A100 (MovieLens, seed 1234, batch 8 x 16, fp16 AMP unless noted):
+
+| Run | Peak lr | Result |
+| --- | --- | --- |
+| first full baseline run (`main.py`) | 8e-4 | 0 valid predictions at the first validation, `loss=nan` for the whole second epoch |
+| `diagnose_nan.py` A | 1e-4 | one epoch (517 optimizer steps), no non-finite loss; loss 5.08 -> 0.32; 4 GradScaler skips (steps 1, 2, 77, 98); largest fp16/bf16 module output 22,400 (`layers.30.mlp.down_proj`) |
+| `diagnose_nan.py` B, bf16 | 1e-4 | stopped by hand at step 195, past the warmup peak (step 129), no non-finite loss; same batches as A |
+
+The NaN therefore needs lr 8e-4; whether fp16 is also needed (runs C/D) was not tested, since it
+does not matter at 1e-4. `run_baseline_movielens.sh`, `run_cluster_hard_movielens.sh` and the
+default of `scripts/benchmark_baseline.py` now use `--lr 1e-4`; warmup start and floor stay 8e-6
+(the values A and B ran with), precision stays fp16 (the released setting; the paper says
+half-precision). The released `train_movielens.sh` / `test_movielens.sh` are left unchanged.
+Results produced with these scripts are a paper-hyperparameter reproduction on the released code,
+not a run of the released script as published.
 
 ## 12. VESSL run log
 

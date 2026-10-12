@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Cluster-hard routing pipeline for MovieLens on VESSL: fixed SASRec-based KMeans clusters,
-# each mapped to one LoRA expert, trained from scratch (spec section 9/11).
+# each mapped to one LoRA expert, trained from scratch (spec section 9/11). Same hyperparameters as
+# run_baseline_movielens.sh, including the paper's peak lr 1e-4 (IMPLEMENTATION_NOTES.md section 11i).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -108,7 +109,7 @@ else
         --output_dir "$OUTPUT_DIR/" \
         --log_dir movielens_cluster_hard_logs \
         --lr_warmup_start_lr 8e-6 \
-        --lr 8e-4 \
+        --lr 1e-4 \
         --lr_decay_min_lr 8e-6 \
         --max_epochs 5 \
         --seed "$SEED"
@@ -145,7 +146,7 @@ else
         --output_dir "$OUTPUT_DIR/" \
         --log_dir movielens_cluster_hard_logs \
         --lr_warmup_start_lr 8e-6 \
-        --lr 8e-4 \
+        --lr 1e-4 \
         --lr_decay_min_lr 8e-6 \
         --max_epochs 5 \
         --seed "$SEED"

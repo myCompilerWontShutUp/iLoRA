@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Baseline (iLoRA dynamic routing) reproduction pipeline for MovieLens on VESSL.
-# Hyperparameters match the released train_movielens.sh / test_movielens.sh exactly
-# (experiments/IMPLEMENTATION_NOTES.md section 8) plus --seed 1234 and the new export flags.
+# Hyperparameters match the released train_movielens.sh / test_movielens.sh (experiments/
+# IMPLEMENTATION_NOTES.md section 8) plus --seed 1234 and the new export flags, except the peak
+# --lr: 1e-4 as in the paper (Appendix E) instead of the released 8e-4, under which the first VESSL
+# run diverged to NaN (IMPLEMENTATION_NOTES.md section 11i).
 #
 # Re-running this script does not redo already-completed steps unless FORCE=1 is set, and
 # "completed" is judged by the presence of the actual output file/metric, not just a checkpoint
@@ -63,7 +65,7 @@ else
         --output_dir "$OUTPUT_DIR/" \
         --log_dir movielens_baseline_logs \
         --lr_warmup_start_lr 8e-6 \
-        --lr 8e-4 \
+        --lr 1e-4 \
         --lr_decay_min_lr 8e-6 \
         --max_epochs 5 \
         --seed "$SEED"
@@ -100,7 +102,7 @@ else
         --output_dir "$OUTPUT_DIR/" \
         --log_dir movielens_baseline_logs \
         --lr_warmup_start_lr 8e-6 \
-        --lr 8e-4 \
+        --lr 1e-4 \
         --lr_decay_min_lr 8e-6 \
         --max_epochs 5 \
         --seed "$SEED"

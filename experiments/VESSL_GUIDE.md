@@ -80,8 +80,12 @@ training); the benchmark in step 7 prints the current estimate.
 
 The first full baseline run on VESSL (fp16 AMP, lr 8e-4, as in the released scripts) showed
 `loss=nan` for the whole second epoch and 0 valid predictions at the first validation. Stop such a
-run (`tmux kill-session -t ilora`): it does not recover. Do not start another full run before the
-cause is isolated; `main.py` and the run scripts stay unchanged until then.
+run (`tmux kill-session -t ilora`): it does not recover.
+
+Outcome (IMPLEMENTATION_NOTES.md section 11i): at the paper's peak lr 1e-4, run A (fp16) trained a
+full epoch and run B (bf16) passed the warmup peak without a non-finite loss, so the NaN needs
+lr 8e-4. The run scripts now use `--lr 1e-4` with fp16; the released `train_movielens.sh` is
+unchanged. The diagnostic below is kept for re-checking.
 
 `scripts/diagnose_nan.py` changes one variable at a time; everything else (MovieLens, seed 1234,
 num_moe 4, lora_r 8, batch 8 x 16, LR schedule shape, MoE-LoRA memory fix, model, data order,

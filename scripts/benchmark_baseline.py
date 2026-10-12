@@ -15,12 +15,11 @@ lora_r=8 -- but executes only a fixed number of real forward/backward micro-batc
 - all output goes under --benchmark_dir (default benchmark_runs/baseline_dry_run), never under
   checkpoints/baseline, outputs/baseline, results/baseline, or logs/
 
-`--lr` defaults to 8e-4, matching the released train_movielens.sh exactly (unchanged default --
-this script's baseline behavior is untouched). Pass `--lr 1e-4` to instead match the value the
-paper's Appendix E states for MovieLens (the released script's own default remains 8e-4; this
-flag never changes it, it only lets this one throwaway run use a different value). Every other
-hyperparameter matches the released code (paper gives no number for lora_r, so the released
-default of 8 is kept, per experiments/CODEBASE_ANALYSIS.md/IMPLEMENTATION_NOTES.md).
+`--lr` defaults to 1e-4, the paper's Appendix E value that run_baseline_movielens.sh and
+run_cluster_hard_movielens.sh use (experiments/IMPLEMENTATION_NOTES.md section 11i); pass
+`--lr 8e-4` for the released train_movielens.sh value. Every other hyperparameter matches the
+released code (paper gives no number for lora_r, so the released default of 8 is kept, per
+experiments/CODEBASE_ANALYSIS.md/IMPLEMENTATION_NOTES.md).
 
 A `BatchMemoryDiagnostics` callback logs, at the start of every micro-batch: batch index, input
 token length (max = the batch's common padded length, mean = average non-padded length per
@@ -123,11 +122,9 @@ def build_args(cli_args):
     p.add_argument('--benchmark_dir', default='benchmark_runs/baseline_dry_run',
                     help='Dedicated, throwaway directory for this benchmark run only.')
     p.add_argument('--num_workers', type=int, default=8)
-    p.add_argument('--lr', type=float, default=8e-4,
-                    help='Peak learning rate. Default 8e-4 matches the released train_movielens.sh '
-                         'exactly (unchanged). Pass 1e-4 to instead match the paper Appendix E value '
-                         'for MovieLens; this only affects this throwaway run, never the released '
-                         'script or main.py default.')
+    p.add_argument('--lr', type=float, default=1e-4,
+                    help='Peak learning rate. Default 1e-4 is the paper Appendix E value the run '
+                         'scripts use; 8e-4 is the released train_movielens.sh value.')
     args = p.parse_args(cli_args)
 
     # Everything below matches run_baseline_movielens.sh / train_movielens.sh exactly (except
@@ -188,7 +185,7 @@ def main():
     print("This does NOT touch checkpoints/baseline, outputs/baseline, results/baseline, or logs/.")
     print(f"Benchmark-only directory: {args.benchmark_dir}")
     print(f"Micro-batches to run: {args.num_train_batches} (no validation, no test, no checkpoint save)")
-    print(f"lr={args.lr} (released train_movielens.sh default is 8e-4; paper Appendix E states 1e-4)")
+    print(f"lr={args.lr} (run scripts and paper Appendix E: 1e-4; released train_movielens.sh: 8e-4)")
     print("")
     print("Reference point from a prior released-code-lr (8e-4) run on this same VESSL A100:")
     print("  37/256 batches completed, ~2.04 sec/batch, OOM with 76.12 GiB allocated / "
