@@ -11,7 +11,9 @@ code (git show 28e4737:SASRecModules_ori.py), bit for bit:
 
 Where the upstream code cannot run (CUDA bfloat16, the reason for the change) the new result is
 compared with the upstream result computed on CPU in bfloat16 for the mask, and checked to be
-finite for the forward passes. Exits non-zero on any mismatch.
+finite for the forward passes. Where neither version can run because the torch build lacks a
+kernel unrelated to the mask (float16 matmul on CPU in torch 2.0), the case is reported as SKIP.
+Exits non-zero on any mismatch or on an error raised only by the new code.
 
     python scripts/test_sasrec_mask_equivalence.py
 """
@@ -63,6 +65,24 @@ def run_upstream(fn):
         return None, str(e).splitlines()[0]
 
 
+def compare_runs(label, run_new, run_old):
+    """new vs upstream. If both raise the same error, the op has no kernel for this dtype on this
+    device in this torch build (e.g. float16 matmul on CPU in torch 2.0): unrelated to the mask,
+    reported as SKIP. If only the new code raises, that is a failure."""
+    new, new_err = run_upstream(run_new)
+    old, old_err = run_upstream(run_old)
+    if new is None:
+        if old is None and new_err == old_err:
+            print(f"  [SKIP] {label}: not supported by this torch build for both versions ({new_err})")
+        else:
+            check(False, f"{label}: new code raised {new_err}")
+    elif old is None:
+        check(bool(torch.isfinite(new).all()), f"{label}: upstream fails ({old_err}); new output finite, "
+                                               f"shape {tuple(new.shape)}")
+    else:
+        check(same(new, old), f"{label}: new == upstream, shape {tuple(new.shape)}")
+
+
 def new_tril(like):
     return torch.tril(torch.ones(like.shape, dtype=torch.bool, device=like.device)).to(like.dtype)
 
@@ -93,12 +113,8 @@ for device in devices:
     for dtype in DTYPES:
         m = mha.to(dtype)
         xs = x.to(dtype)
-        new = m(xs, xs)
-        old, err = run_upstream(lambda: old_mod.MultiHeadAttention.forward(m, xs, xs))
-        if old is None:
-            check(bool(torch.isfinite(new).all()), f"{device} {dtype}: upstream fails ({err}); new output finite")
-        else:
-            check(same(new, old), f"{device} {dtype}: new == upstream")
+        compare_runs(f"{device} {dtype}", lambda: m(xs, xs),
+                     lambda: old_mod.MultiHeadAttention.forward(m, xs, xs))
 
 print("3. rec_model/movielens.pt cacul_h on MovieLens training sequences")
 from data.movielens_data import MovielensData  # noqa: E402
@@ -116,22 +132,19 @@ for device in devices:
     for dtype in DTYPES:
         autocast = (torch.autocast(device_type=device, dtype=dtype) if dtype != torch.float32
                     else torch.autocast(device_type=device, enabled=False))
-        with torch.no_grad(), autocast:
+
+        def run(forward=None):
+            if forward is not None:
+                attn.forward = types.MethodType(forward, attn)
             try:
-                new = rec.cacul_h(seq.to(device), len_seq.to(device))
-            except RuntimeError as e:  # e.g. an op without a kernel for this dtype on this device
-                check(False, f"{device} {dtype}: new cacul_h raised {str(e).splitlines()[0]}")
-                continue
-            attn.forward = types.MethodType(old_mod.MultiHeadAttention.forward, attn)
-            try:
-                old, err = run_upstream(lambda: rec.cacul_h(seq.to(device), len_seq.to(device)))
+                with torch.no_grad(), autocast:
+                    return rec.cacul_h(seq.to(device), len_seq.to(device))
             finally:
-                del attn.forward
-        if old is None:
-            check(bool(torch.isfinite(new).all()), f"{device} autocast {dtype}: upstream fails ({err}); "
-                                                   f"new output finite, shape {tuple(new.shape)}")
-        else:
-            check(same(new, old), f"{device} autocast {dtype}: new == upstream, shape {tuple(new.shape)}")
+                if forward is not None:
+                    del attn.forward
+
+        compare_runs(f"{device} autocast {dtype}", run,
+                     lambda: run(old_mod.MultiHeadAttention.forward))
 
 if failures:
     print(f"{len(failures)} check(s) failed", file=sys.stderr)
