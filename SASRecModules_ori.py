@@ -66,7 +66,9 @@ class MultiHeadAttention(nn.Module):
         
         # Causality - Future Blinding
         diag_vals = torch.ones_like(matmul_output[0, :, :])   # (T_q, T_k)
-        tril = torch.tril(diag_vals)  # (T_q, T_k)
+        # torch 2.0's CUDA tril has no bfloat16 kernel; build the same 0/1 lower triangle as bool and
+        # cast it to diag_vals' dtype, so every dtype gets exactly the values torch.tril(diag_vals) gave.
+        tril = torch.tril(torch.ones(diag_vals.shape, dtype=torch.bool, device=diag_vals.device)).to(diag_vals.dtype)  # (T_q, T_k)
         causality_mask = tril.unsqueeze(0).repeat(matmul_output.shape[0], 1, 1)  # (h*N, T_q, T_k)
         causality_paddings = torch.ones_like(causality_mask) * (-2 ** 32 + 1)
         matmul_output_m2 = torch.where(torch.eq(causality_mask, 0), causality_paddings, matmul_output_m1)  # (h*N, T_q, T_k)

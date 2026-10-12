@@ -101,6 +101,11 @@ loss, lr, loss, gradient norm, GradScaler scale and skipped steps (fp16), the mo
 produced inf/NaN, token lengths, gate finiteness, and trainable parameters finite before and after
 each optimizer step. `--lr` changes only the peak; warmup start and floor stay 8e-6.
 
+bf16 needs the SASRec causal-mask change in `SASRecModules_ori.py` (torch 2.0 has no CUDA
+bfloat16 `torch.tril`; the mask is now built as bool and cast, giving identical values in every
+dtype). `python scripts/test_sasrec_mask_equivalence.py` checks that on the GPU before run B,
+including that the fp16 path is bit-identical to the upstream code used for run A.
+
 `--compare` checks that the two runs saw the same batches and differ only in precision, then
 reads the outcome as: fp16 NaN / bf16 stable -> precision very likely; both stable -> lr 8e-4
 alone or together with fp16; both NaN -> not precision alone; fp16 stable / bf16 NaN -> unexpected,
