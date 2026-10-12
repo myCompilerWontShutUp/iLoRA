@@ -47,7 +47,12 @@ try:
 except Exception as e:  # report instead of crashing, so the other checks stay visible
     check(False, f"import bitsandbytes: {type(e).__name__}: {e}")
 else:
-    check(True, f"import bitsandbytes {bitsandbytes.__version__}")
+    try:  # bitsandbytes 0.37.2 has no __version__; the version is informational only
+        from importlib.metadata import version
+        bnb_version = version('bitsandbytes')
+    except Exception:
+        bnb_version = 'unknown'
+    check(True, f"import bitsandbytes {bnb_version}")
     picked = determine_cuda_runtime_lib_path()
     check(picked is not None and os.path.exists(link) and os.path.samefile(picked, link),
           f"runtime bitsandbytes picks = {picked}")
