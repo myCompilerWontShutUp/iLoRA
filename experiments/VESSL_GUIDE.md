@@ -59,20 +59,32 @@ training); the benchmark in step 7 prints the current estimate.
 
 The first full baseline run on VESSL (fp16 AMP, lr 8e-4, as in the released scripts) showed
 `loss=nan` for the whole second epoch and 0 valid predictions at the first validation. Stop such a
-run (`tmux kill-session -t ilora`): it does not recover. Then, in the conda env:
+run (`tmux kill-session -t ilora`): it does not recover. Do not start another full run before the
+cause is isolated; `main.py` and the run scripts stay unchanged until then.
+
+`scripts/diagnose_nan.py` changes one variable at a time; everything else (MovieLens, seed 1234,
+num_moe 4, lora_r 8, batch 8 x 16, LR schedule shape, MoE-LoRA memory fix, model, data order,
+step limit) is identical between runs. In the conda env, one run after the other:
 
 ```bash
-python scripts/diagnose_nan.py --llm_path "$LLM_PATH"                    # same config as the run
-python scripts/diagnose_nan.py --llm_path "$LLM_PATH" --precision bf16   # candidate fix
+python scripts/diagnose_nan.py --llm_path "$LLM_PATH" --lr 1e-4 --precision 16   2>&1 | tee logs/diag_A.log   # A
+python scripts/diagnose_nan.py --llm_path "$LLM_PATH" --lr 1e-4 --precision bf16 2>&1 | tee logs/diag_B.log   # B
+python scripts/diagnose_nan.py --compare benchmark_runs/nan_diag/p16_lr0.0001 benchmark_runs/nan_diag/pbf16_lr0.0001
 ```
 
-Each run trains the baseline configuration with the full-run LR schedule until 48 micro-batches
-after the first non-finite loss (or one epoch, about 2 h at most) and writes
-`benchmark_runs/nan_diag/<config>/summary.json` plus per-micro-batch and per-optimizer-step CSVs.
-The summary names the module that first produced inf/NaN, whether the parameters were still
-finite, and whether GradScaler skipped every later step (fp16 overflow leaves the run stuck at
-fixed parameters). `--precision bf16` matches the dtype the weights are loaded in and LLaRA's
-default; whether the full run should switch is decided from these two summaries.
+Each run trains until 48 micro-batches after the first non-finite loss, or for one epoch (about
+2 h) if there is none, and writes `benchmark_runs/nan_diag/<config>/`: `summary.json`,
+`micro_batches.csv`, `optimizer_steps.csv`, and for a NaN run `first_nan_batch.pt` /
+`first_nan_trainable.pt`. Recorded: epoch / micro-batch / optimizer step of the first non-finite
+loss, lr, loss, gradient norm, GradScaler scale and skipped steps (fp16), the module that first
+produced inf/NaN, token lengths, gate finiteness, and trainable parameters finite before and after
+each optimizer step. `--lr` changes only the peak; warmup start and floor stay 8e-6.
+
+`--compare` checks that the two runs saw the same batches and differ only in precision, then
+reads the outcome as: fp16 NaN / bf16 stable -> precision very likely; both stable -> lr 8e-4
+alone or together with fp16; both NaN -> not precision alone; fp16 stable / bf16 NaN -> unexpected,
+re-check the implementation. Optional follow-ups, not run automatically: C `--lr 8e-4 --precision 16`
+and D `--lr 8e-4 --precision bf16`, compared the same way.
 
 ## Running baseline and cluster_hard in parallel (two workspaces, about one day instead of two)
 
