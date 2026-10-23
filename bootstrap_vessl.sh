@@ -149,6 +149,7 @@ echo "[5/8] preflight (includes scripts/env_check.py) + CPU regression tests"
 bash scripts/preflight_vessl.sh
 python scripts/test_moelora_equivalence.py
 python scripts/test_measurement.py
+python scripts/test_main_args_unchanged.py
 
 if [[ "${SKIP_GPU_CHECKS:-0}" == "1" ]]; then
     echo "SKIP_GPU_CHECKS=1: skipping the GPU checks (steps 6-7)."

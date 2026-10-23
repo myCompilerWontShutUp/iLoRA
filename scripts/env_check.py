@@ -147,7 +147,8 @@ def check_python(r):
     prefix = os.environ.get('CONDA_PREFIX', '')
     env = os.environ.get('CONDA_DEFAULT_ENV', '')
     version = '%d.%d.%d' % sys.version_info[:3]
-    if env != EXPECTED['env'] or not prefix:
+    # `conda activate ilora` and `conda activate /path/to/envs/ilora` are the same env
+    if EXPECTED['env'] not in (env, os.path.basename(env.rstrip('/')), os.path.basename(prefix.rstrip('/'))) or not prefix:
         r.fail('conda env', f"active env is '{env or 'none'}'; run: source \"$(conda info --base)/etc/profile.d/conda.sh\" "
                             f"&& conda activate {EXPECTED['env']}")
     else:

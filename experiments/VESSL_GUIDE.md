@@ -195,6 +195,7 @@ explains every column). The hooks only read tensors; without `--measure`, `main.
 # once on a new workspace (GPU, about 25-40 min): bit-identity, overhead, short run, kill test
 python scripts/verify_measurement_gpu.py --llm_path "$LLM_PATH"
 python scripts/test_measurement.py                                   # CPU, about 1 min
+python scripts/test_main_args_unchanged.py                           # main.py args unchanged without --measure
 
 # diagnostic run (fp16 / bf16) and the activation baseline before training
 python scripts/diagnose_nan.py --llm_path "$LLM_PATH" --lr 1e-4 --precision 16
