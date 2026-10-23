@@ -8,7 +8,9 @@
 4. a writer killed mid-run leaves every row up to its last flush readable;
 5. end to end: a toy run folder gets every file, and plot_measurement.py, plot_live.py,
    inspect_anomaly.py, finalize_run.py and compare_base_vs_trained.py work from the folder alone;
-6. main.py's measurement flags are split off without touching any main.py argument.
+6. main.py's measurement flags are split off without touching any main.py argument;
+7. values written to the CSV files read back bit-identical (pandas' default float parser changes
+   the last bit of many values; measurement.io.read_frame uses round_trip).
 
     python scripts/test_measurement.py
 """
@@ -330,8 +332,25 @@ def test_main_flags():
           'with --measure the measurement flags are removed, the rest unchanged')
 
 
+def test_exact_round_trip():
+    print('7. raw values read back exactly')
+    rng = np.random.default_rng(0)
+    vals = np.concatenate([rng.standard_normal(5000) * 10.0 ** rng.integers(-12, 8, 5000),
+                           [22400.0, 65504.0, 0.1 + 0.2, 1e-30, 3.4e38, float('inf'), -float('inf')]])
+    path = os.path.join(tempfile.mkdtemp(), 'values.csv.gz')
+    w = CsvWriter(path, ['value'])
+    for v in vals:
+        w.writerow({'value': float(v)})
+    w.close()
+    frame = read_frame(path)['value'].to_numpy(dtype=np.float64)
+    rows = np.array([float(r['value']) for r in read_rows(path)])
+    check(np.array_equal(frame.view(np.int64), vals.view(np.int64)) and np.array_equal(rows.view(np.int64), vals.view(np.int64)),
+          f'{len(vals)} floats bit-identical through read_frame and read_rows')
+
+
 if __name__ == '__main__':
-    for test in (test_tracker, test_quantiles, test_noop, test_kill, test_end_to_end, test_main_flags):
+    for test in (test_tracker, test_quantiles, test_noop, test_kill, test_end_to_end, test_main_flags,
+                 test_exact_round_trip):
         test()
     if failures:
         print(f'{len(failures)} check(s) failed', file=sys.stderr)

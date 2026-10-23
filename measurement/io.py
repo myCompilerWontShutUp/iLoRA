@@ -81,14 +81,16 @@ def read_rows(path):
 
 
 def read_frame(path):
-    """pandas DataFrame of a (possibly truncated) CSV, or None if the file is missing or empty."""
+    """pandas DataFrame of a (possibly truncated) CSV, or None if the file is missing or empty.
+    Floats are parsed with float_precision='round_trip': pandas' default fast parser changes the
+    last bit of about a third of the values, round_trip returns exactly what was written."""
     import pandas as pd
     if path is None or not os.path.exists(path):
         return None
     text = read_text(path)
     if not text.strip():
         return None
-    frame = pd.read_csv(io.StringIO(text), low_memory=False)
+    frame = pd.read_csv(io.StringIO(text), low_memory=False, float_precision='round_trip')
     return frame if len(frame) else None
 
 

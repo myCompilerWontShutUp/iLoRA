@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.colors import LogNorm  # noqa: E402
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: E402
 
 from .io import find, read_frame, read_json  # noqa: E402
 from .schema import FP16_MAX, KNOWN_MASSIVE_DIMS, MODULE_TYPES, short_name  # noqa: E402
@@ -37,7 +38,7 @@ class Run:
         if not self.meta:  # older diagnose_nan.py folders: summary.json only
             summary = read_json(os.path.join(run_dir, 'summary.json'))
             self.meta = {'precision': summary.get('config', {}).get('precision'),
-                         'max_lr': summary.get('config', {}).get('lr')}
+                         'max_lr': summary.get('config', {}).get('lr'), 'config': summary.get('config', {})}
         self.precision = str(self.meta.get('precision') or '')
         self.micro = self._numeric(read_frame(find(run_dir, 'micro_batches')))
         self.steps = self._numeric(read_frame(find(run_dir, 'optimizer_steps')))
@@ -73,6 +74,14 @@ class Run:
 
 
 LINESTYLES = ('-', '--', ':', '-.')
+
+
+def _log_axis(ax, axis='y'):
+    """Log axis readable over a narrow range: ticks at 1, 2, 5 x 10^k, printed as plain numbers."""
+    a = ax.yaxis if axis == 'y' else ax.xaxis
+    a.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+    a.set_major_formatter(FuncFormatter(lambda v, _: f'{v:,.0f}' if v >= 1 else f'{v:g}'))
+    a.set_minor_formatter(NullFormatter())
 
 
 def _styles(runs):
@@ -120,6 +129,7 @@ def fig_m_t(runs, out_dir):
     _anomaly_markers(ax, have[0])
     _limit_lines(ax, have[0].meta.get('settings', {}).get('abs_threshold'))
     ax.set_yscale('log')
+    _log_axis(ax)
     ax.set(xlabel='micro-batch', ylabel='m_t = max |activation| (fp16/bf16 outputs)',
            title='Largest activation per micro-batch')
     ax.legend(fontsize=7, loc='lower right')
@@ -136,6 +146,7 @@ def fig_modules(run, out_dir, top=15):
     axes[0].boxplot(data, vert=False, labels=list(order), showfliers=True, flierprops={'markersize': 2})
     axes[0].invert_yaxis()
     axes[0].set_xscale('log')
+    _log_axis(axes[0], 'x')
     axes[0].axvline(FP16_MAX, color=LIMIT, ls='--', lw=1.2, label=f'fp16 max {FP16_MAX:,.0f}')
     every = run.meta.get('settings', {}).get('stats_every', 1)
     axes[0].set(xlabel='max |activation| per recorded micro-batch',
@@ -186,6 +197,7 @@ def fig_quantile_trend(run, out_dir, module=None):
                 color={'median_abs': '#7F8C8D', 'p99_abs': run.color, 'max_abs': '#2C3E50'}[col])
     _limit_lines(ax)
     ax.set_yscale('log')
+    _log_axis(ax)
     ax.set(xlabel='micro-batch', ylabel='|activation|',
            title=f'Typical vs largest values: {module}')
     ax.legend(fontsize=8)
@@ -208,6 +220,7 @@ def fig_loss_grad(runs, out_dir):
     axes[0].set(ylabel='loss (mean over the step)', title='Training loss and gradient norm')
     axes[1].set(xlabel='optimizer step', ylabel='gradient L2 norm (unscaled)')
     axes[1].set_yscale('log')
+    _log_axis(axes[1])
     axes[0].legend(fontsize=7)
     return _save(fig, out_dir, 'loss_grad_norm.png')
 
@@ -284,6 +297,7 @@ def fig_base_vs_trained(run, bases, out_dir, focus=('layers.30.mlp.down_proj',),
     for patch, s in zip(bp['boxes'], series):
         patch.set_facecolor(s[2])
     axes[0].set_xscale('log')
+    _log_axis(axes[0], 'x')
     axes[0].axvline(FP16_MAX, color=LIMIT, ls='--', lw=1.2)
     axes[0].set(xlabel='m_t per micro-batch', title='m_t: before training vs trained run')
     axes[0].tick_params(axis='y', labelsize=7)
@@ -304,6 +318,7 @@ def fig_base_vs_trained(run, bases, out_dir, focus=('layers.30.mlp.down_proj',),
         axes[1].set_yticks(y + width * len(bases) / 2, mods, fontsize=7)
         axes[1].invert_yaxis()
         axes[1].set_xscale('log')
+        _log_axis(axes[1], 'x')
         axes[1].axvline(FP16_MAX, color=LIMIT, ls='--', lw=1.2)
         axes[1].set(xlabel='max |activation| over the micro-batches', title='Per module')
         axes[1].legend(fontsize=7)
@@ -323,9 +338,11 @@ def fig_live(run, out_dir):
         _anomaly_markers(ax_m, run)
     _limit_lines(ax_m, run.meta.get('settings', {}).get('abs_threshold'))
     ax_m.set_yscale('log')
+    _log_axis(ax_m)
     if run.steps is not None and len(run.steps):
         ax_grad.plot(run.steps['optimizer_step'], run.steps['grad_norm'], color=run.color)
         ax_grad.set_yscale('log')
+        _log_axis(ax_grad)
         if run.steps['scale_after'].notna().any():
             ax_scale.step(run.steps['optimizer_step'], run.steps['scale_after'], where='post', color=run.color)
             sk = run.steps[run.steps['skipped_by_grad_scaler'].astype(str).str.lower().isin(['true', '1'])]
