@@ -52,7 +52,7 @@ show("torch version", lambda: __import__("torch").__version__)
 show("transformers version", lambda: __import__("transformers").__version__)
 show("peft (vendored model/peft) version", lambda: __import__("model.peft", fromlist=["__version__"]).__version__)
 show("pytorch_lightning version", lambda: __import__("pytorch_lightning").__version__)
-show("bitsandbytes version", lambda: __import__("bitsandbytes").__version__)
+show("bitsandbytes version", lambda: __import__("importlib.metadata", fromlist=["version"]).version("bitsandbytes"))
 
 # Hard gate: nvidia-smi succeeding only proves the driver sees a GPU, not that this specific
 # torch build can use it (requirements.txt pins torch==2.0.0 with no CUDA-build pin, so a
@@ -97,6 +97,12 @@ if [[ -w "$OUTPUT_DIR" ]]; then
     echo "[output directory] $OUTPUT_DIR is writable."
 else
     echo "FATAL: output directory $OUTPUT_DIR is not writable." >&2
+    exit 1
+fi
+
+echo "[environment] scripts/env_check.py"
+if ! python scripts/env_check.py; then
+    echo "FATAL: scripts/env_check.py reported FAIL lines above. Aborting before any training." >&2
     exit 1
 fi
 

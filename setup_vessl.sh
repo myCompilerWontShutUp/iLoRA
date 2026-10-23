@@ -41,7 +41,7 @@ else
 fi
 
 echo "[4/8] Installing dependencies from requirements.txt (pinned versions, no upgrades applied)"
-pip install -r requirements.txt
+python -m pip install -r requirements.txt   # the active env's pip, never another one on PATH
 
 echo "[5/8] bitsandbytes: use the CUDA runtime torch was built with, not the system CUDA"
 # bitsandbytes==0.37.2 otherwise picks up the image's CUDA 12.8 runtime (/usr/local/cuda/lib64),

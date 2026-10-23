@@ -11,6 +11,8 @@ cd "$REPO_ROOT"
 export CUDA_VISIBLE_DEVICES
 
 echo "=== run_all_vessl.sh started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+# Where the results will live: a workspace Pause/Stop deletes the container filesystem.
+python scripts/env_check.py --storage-only || true
 
 bash run_baseline_movielens.sh
 bash run_cluster_hard_movielens.sh
@@ -24,3 +26,4 @@ python analysis/generate_summary.py \
 
 echo "=== run_all_vessl.sh finished at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 echo "See results/today_summary.md for the full write-up."
+echo "Before pausing the workspace: bash scripts/archive_results.sh --with-checkpoints, then download archives/<file>.tgz"

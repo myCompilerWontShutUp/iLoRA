@@ -22,6 +22,10 @@ log/
 
 # scripts/benchmark_baseline.py's throwaway dry-run directory (never a real experiment result)
 benchmark_runs/
+# scripts/archive_results.sh output (download it, do not commit it)
+archives/
+# measurement run folders (raw per-micro-batch data, anomaly dumps): copied out, not committed
+runs/
 
 # results/ and artifacts/ are intentionally NOT ignored: small CSV/JSON/Markdown/PNG results and
 # the small KMeans joblib artifact are meant to be committed for research-result preservation

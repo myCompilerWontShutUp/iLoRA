@@ -34,6 +34,10 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=== run_cluster_hard_movielens.sh started at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
+# Environment gate (GPU, torch CUDA 11.7, bitsandbytes, patches, weights, data, disk, tmux): this
+# script also runs on its own in the second workspace of a parallel run, without run_baseline's check.
+LLM_PATH="$LLM_PATH" DATA_DIR="$DATA_DIR" PREFLIGHT_OUTPUT_DIR="$OUTPUT_DIR" bash scripts/preflight_vessl.sh
+
 echo "[1/7] Checking train SASRec representations"
 if [[ -f "$BASELINE_RESULTS_DIR/representations_train.npz" && "$FORCE" != "1" ]]; then
     echo "  $BASELINE_RESULTS_DIR/representations_train.npz already exists; skipping extraction."
