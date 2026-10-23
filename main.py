@@ -36,7 +36,7 @@ def load_callbacks(args):
             logging_interval='step'))
     return callbacks
 
-def main(args):
+def main(args, measure_args=None):
     pl.seed_everything(args.seed)
     model = MInterface(**vars(args))
     if args.ckpt_path:
@@ -51,6 +51,18 @@ def main(args):
     logger = TensorBoardLogger(save_dir='./log/', name=args.log_dir)
     args.callbacks = load_callbacks(args)
     args.logger = logger
+    if measure_args is not None and measure_args.measure:
+        # exp/gate-cluster: optional run folder with step / micro-batch logs, activation stats and
+        # anomalies (experiments/IMPLEMENTATION_NOTES.md section 11j). Read-only callback; off by default.
+        from measurement.callback import MeasurementCallback
+        from measurement.config import settings_from_args
+        from measurement.rundir import make_run_dir
+        run_dir = make_run_dir(measure_args.measure_root,
+                               measure_args.measure_name or f'{args.mode}_{args.routing_mode}')
+        args.callbacks.append(MeasurementCallback(
+            run_dir, settings_from_args(measure_args), str(args.precision), vars(args).copy(), args.lr, args.seed,
+            activation_monitor=not measure_args.no_activation_monitor,
+            warmup_steps=args.max_steps // 20, max_steps=args.max_steps))
     if not os.path.exists(args.ckpt_dir):
         os.makedirs(args.ckpt_dir)
 
@@ -146,7 +158,11 @@ if __name__ == '__main__':
     parser.add_argument('--export_gates', default=False, action='store_true')
     parser.add_argument('--results_dir', default='results/baseline', type=str)
 
-    args = parser.parse_args()
+    # Measurement flags (--measure ...) are parsed separately and removed first, so that without
+    # them args, the model hparams and the callbacks are exactly as before.
+    from measurement.config import measurement_parser
+    measure_args, remaining = measurement_parser().parse_known_args()
+    args = parser.parse_args(remaining)
     
     if 'movielens' in args.data_dir:
         args.padding_item_id = 1682
@@ -155,4 +171,4 @@ if __name__ == '__main__':
     elif 'lastfm' in args.data_dir:
         args.padding_item_id = 4606
 
-    main(args)
+    main(args, measure_args)

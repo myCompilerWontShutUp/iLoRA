@@ -447,10 +447,15 @@ the 8.51% Imp. that disagrees, not the HR; (3) iLoRA's "ChatRec" row is numerica
 
 - Real Llama-2 tokenizer on the TrainCollater prompts: padded batch length L has mean 272,
   p90 288, p97 ~296, max 322.
-- The failed request, 148.00 MiB = 155,189,248 B = 8 x 296 x 4 x 4096 x 4 B: exactly one fp32
-  `[batch=8, L=296, num_moe=4, 4096]` tensor, i.e. `B_out * Gate` (or its gradient) of a
-  4096-wide MoE-LoRA target module. No other tensor shape in the model factors to this size with
-  a plausible L.
+- The failed request reads "Tried to allocate 148.00 MiB". torch 2.0's caching allocator prints
+  the request rounded up to a multiple of 2 MiB (`get_allocation_size`, kRoundLarge), so the real
+  request was in (146, 148] MiB. That matches a fp32 `[batch=8, L, num_moe=4, 4096]` tensor
+  (`B_out * Gate` of a 4096-wide MoE-LoRA module; under fp16 autocast `B_out` itself is fp16 and
+  the product with the fp32 gate is fp32) for L = 293-296, but also e.g. fp16 logits
+  `[8, L, 32005]` for L = 299-303. The message names no tensor, so this identification is an
+  inference from size only (corrected 2026-10-23; an earlier version said "exactly one fp32
+  tensor" and "no other tensor shape"). The evidence that the per-expert outputs caused the OOM is
+  the memory measurement below and the fix removing the OOM, not this one number.
 - Upstream `moelora.Linear.forward` builds `B_out = einsum(A_out, B)` of shape
   `[B, L, num_moe, out_features]` in every target module of every layer and keeps it for
   backward (needed for the gradient w.r.t. the gate). Measured with saved-tensor hooks on the
@@ -537,6 +542,77 @@ default of `scripts/benchmark_baseline.py` now use `--lr 1e-4`; warmup start and
 half-precision). The released `train_movielens.sh` / `test_movielens.sh` are left unchanged.
 Results produced with these scripts are a paper-hyperparameter reproduction on the released code,
 not a run of the released script as published.
+
+## 11j. Measurement, raw-data storage and anomaly tracking (2026-10-23)
+
+Package `measurement/` plus scripts; a run folder's README.txt lists every column.
+
+- **Run folders.** Every measured run writes a new `runs/<name>_<YYYYmmdd-HHMMSS>/` (never reused;
+  `--out_dir` must be new or empty): `meta.json` (git commit and `git status`, command line, config,
+  seed, precision, max lr, torch / CUDA / GPU, start and end time, every threshold and sample size,
+  TensorBoard folder, paths of the later-analysis inputs `gates_test.csv`, representation npz,
+  assignment CSVs and `metrics.json`), `micro_batches.csv.gz`, `optimizer_steps.csv.gz`,
+  `activation_stats.csv.gz`, `anomalies.csv`, `anomaly_dumps/`, `anomaly_report.md`, `README.txt`,
+  and `gpu.csv` when `scripts/gpu_monitor.py` runs. Gzip CSVs are flushed every optimizer step and
+  every 16 micro-batches; `measurement.io.read_frame` reads a file cut off by a kill up to its last
+  flush. `runs/` is git-ignored; copy folders out before pausing a VESSL workspace.
+- **Hooks (`measurement/activation.py`).** Forward hooks on every module whose output (first tensor of
+  a tuple) is fp16/bf16, the set behind the earlier `max_abs_lowp_out`; a module called several
+  times in one forward is recorded per call (`name#2`, ...). Each call is reduced on the GPU: max
+  |value| and its position (found among the 32 rows with the largest row maxima, which contain the
+  32 largest elements), the 32 largest values, the output row holding the maximum, the non-finite
+  count; on recorded micro-batches (`--stats_every`, default every one, 0 = never) also mean |value|
+  and std over all elements (float32) and median / p90 / p99 / p999 of |value| from a
+  100,000-element random sample (`--quantile_sample`; exact when the output is smaller). The sample
+  uses the monitor's own `torch.Generator` (`--sample_seed`), so the global RNG that dropout uses is
+  untouched. Results are stacked and moved to the CPU once per micro-batch. The hooks read detached
+  tensors and return nothing.
+- **m_t columns.** `micro_batches.csv.gz` keeps the earlier diagnose_nan.py columns and adds m_t with
+  its module, layer, module type, sample, dataset sample id, token position / id / string, feature
+  dim, sign, first-token and known-massive-dim (1415 / 2533 of a 4096-wide output) flags, and the
+  non-finite element count. Token fields are filled only for LLaMA outputs shaped
+  `[batch, L, features]` (SASRec and projector outputs are not token-aligned).
+- **Anomaly tracker (`measurement/anomaly.py`).** Per module and micro-batch, always (not subject to
+  `--stats_every`): `nonfinite` and `over_fp16_max` (> 65,504) give critical; `high`
+  (>= 0.5 x 65,504) gives high; `abs` (>= 16,384) and `ratio` (>= 4 x the module's median over the
+  previous 200 micro-batches, once 20 exist) give warn; `record` (new per-module maximum, only after
+  100 micro-batches, since at the start every module sets a record each time) gives info. All
+  thresholds are flags. `warn` is a severity added here (the task listed info / high / critical).
+  The fp16 rules are applied to bf16 runs too, labeled by the `precision` column. Dumps
+  (`<event_id>.npz` + `.txt`): the token vector at the event, the 32 largest values with (sample,
+  token, feature), the sample's input ids and decoded prompt, the max |value| of the other modules
+  of the same layer; at most 200 dumps, high and critical always dumped. Terminal lines for warn
+  and above (`--print_level`); info events go to anomalies.csv only.
+- **Where it runs.** `scripts/diagnose_nan.py` now builds on `measurement.callback.MeasurementCallback`;
+  its earlier columns, `--compare`, origin module, first-NaN dumps and early stop are unchanged,
+  its output moved from `benchmark_runs/nan_diag/<tag>/` to a run folder, and `--compare` still
+  reads the earlier folders. `--max_micro_batches` was added. `main.py --measure` (with the same
+  flags) attaches the callback to the real training. The measurement flags are parsed by a separate
+  parser and removed before `main.py`'s own parser, so without them `args`, the model hparams and
+  the callbacks are exactly as before. TensorBoard logging (L1, L2) is unchanged; its folder is
+  recorded in meta.json.
+- **Baseline activation.** `scripts/measure_base_activation.py`: forward passes only, on the first N
+  (200) micro-batches of the same seeded training dataloader, with (a) LoRA disabled and (b) the
+  step-0 MoE-LoRA model (or `--ckpt_path`), fp16 or bf16. `lora_B` starts at zero, so (b) equals (a)
+  on the base path. `compare_base_vs_trained.md` (also `scripts/compare_base_vs_trained.py`)
+  compares m_t and per-module maxima with a trained run and checks that the batch order matched.
+- **Tools.** `scripts/gpu_monitor.py` (L3, separate process, stops when the run ends),
+  `scripts/plot_live.py --watch` (L4, warns on non-finite losses and critical events),
+  `analysis/plot_measurement.py` (figures from the folder alone), `scripts/inspect_anomaly.py`,
+  `scripts/finalize_run.py` (README and report after a hard kill).
+- **Checks.** `scripts/test_measurement.py` (CPU, synthetic data): a planted value is found at the
+  exact (sample, token, feature) with the right rules and dump; sampled quantiles within 0.5% of the
+  exact ones (exact for small outputs); loss, gradients and RNG state bit-identical with and without
+  hooks (float32, bf16); a killed writer leaves every flushed row; a toy folder yields every file,
+  figure and report. `scripts/verify_measurement_gpu.py` (VESSL): the same bit-identity on the real
+  model in fp16 and bf16 (with an off-vs-off run that shows whether the GPU run is deterministic at
+  all), hook overhead, run-folder size per epoch, a 50-micro-batch run with figures, a SIGKILL test.
+- **Open item: gates of all users.** Gates are exported only from `generate()` on validation / test
+  (`MInterface._record_gate_export`, 95 MovieLens test sequences). The gate depends only on the
+  SASRec user representation and the router (`gate = router(encode_users(seq, len_seq))`), so the
+  gate of every train / validation / test sequence needs only `rec_model` and the trained router
+  weights from a checkpoint, no LLaMA: a CPU script that loads `router.*` from `last.ckpt`, runs
+  `rec_model.cacul_h` over each split and writes `gates_<split>.csv` in the existing format.
 
 ## 12. VESSL run log
 
