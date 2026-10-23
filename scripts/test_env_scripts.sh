@@ -97,7 +97,10 @@ ARCHIVE_ROOT="$AR" bash "$REPO/scripts/archive_results.sh" > "$TMP/a1.txt" 2>&1
 ARCHIVE_ROOT="$AR" bash "$REPO/scripts/archive_results.sh" --with-checkpoints > "$TMP/a2.txt" 2>&1
 N="$(ls "$AR/archives"/*.tgz 2>/dev/null | wc -l)"
 check '[[ "$N" -eq 2 ]]' "two runs, two distinct archives (got $N)"
-FIRST="$(ls "$AR/archives"/*.tgz | head -1)"; LAST="$(ls "$AR/archives"/*.tgz | tail -1)"
+# Take each run's archive from its own output: two archives made within one second are named
+# <name>.tgz and <name>-1.tgz, and '-' sorts before '.', so ls order is not creation order.
+FIRST="$AR/archives/$(sed -n 's#^Wrote .*/archives/\([^ ]*\.tgz\).*#\1#p' "$TMP/a1.txt")"
+LAST="$AR/archives/$(sed -n 's#^Wrote .*/archives/\([^ ]*\.tgz\).*#\1#p' "$TMP/a2.txt")"
 (cd "$AR/archives" && tar tzf "$(basename "$FIRST")" > "$TMP/first.txt" && tar tzf "$(basename "$LAST")" > "$TMP/last.txt")
 check 'grep -q "results/baseline/metrics.json" "$TMP/first.txt" && grep -q "runs/r1/meta.json" "$TMP/first.txt" && ! grep -q checkpoints "$TMP/first.txt"' "default archive: logs/results/runs, no checkpoints"
 check 'grep -q "checkpoints/baseline/last.ckpt" "$TMP/last.txt" && grep -q "manifest.txt" "$TMP/last.txt"' "--with-checkpoints adds checkpoints; manifest inside"
