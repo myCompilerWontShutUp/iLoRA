@@ -27,10 +27,13 @@ the ones that produced results/baseline/metrics.json. `--mode test` only calls t
 Safety: the output folder must not exist; the checkpoint and the reference results are hashed
 before and after; the code must be identical to the commit that trained the checkpoint.
 
+Relative paths given to this script are resolved against the repository root, whatever the
+current directory is.
+
     python scripts/eval_prompt_semantics.py --prompt_mode current_hybrid \\
         --ckpt checkpoints/baseline/last.ckpt --expect_reference
     python scripts/eval_prompt_semantics.py --prompt_mode aug2024_text_only --ckpt checkpoints/baseline/last.ckpt
-    python scripts/eval_prompt_semantics.py --summarize runs/semantics_eval
+    python scripts/eval_prompt_semantics.py --summarize runs/semantics_eval_v2
 """
 import argparse
 import ast
@@ -43,11 +46,20 @@ import os
 import re
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# `python scripts/eval_prompt_semantics.py` puts scripts/ first on sys.path. The repository packages
+# (imported before main.py runs, e.g. data.data_interface for aug2024_text_only) and main.py itself
+# need the repository root there instead, exactly as for `python main.py`.
+if sys.path and os.path.abspath(sys.path[0]) == os.path.dirname(os.path.abspath(__file__)):
+    sys.path[0] = REPO
+elif REPO not in sys.path:
+    sys.path.insert(0, REPO)
 CHECKPOINT_COMMIT = '6c7ebaceac99a97fa868ac7590a786d489b88c37'  # trained and tested results/baseline
 UPSTREAM_BASE = '28e47371192121b6ced44401d9e149fedfae13de'      # AkaliKong/iLoRA main the fork is based on
 HISTORICAL = {
@@ -71,10 +83,27 @@ REFERENCE_COUNTS = [95, 86, 30]  # total, valid, correct of the 6c7ebac baseline
 EXPORT_GATES_NOTE = ('--export_gates removed: the historical collater builds the old batch schema without sample_idx, '
                      'which gate export reads; gates depend only on the SASRec user representation, not on the prompt')
 DATALOADER_CHECK = {}
-PROTECTED = ('checkpoints', 'results/baseline', 'outputs/baseline', 'archives')
+# read only for this script; runs/semantics_eval holds the results of the first version (11dc9e3)
+PROTECTED = ('checkpoints', 'results/baseline', 'outputs/baseline', 'archives', 'runs/semantics_eval')
+DEFAULT_OUT_ROOT = 'runs/semantics_eval_v2'
 OWN_FILES = ('scripts/eval_prompt_semantics.py',)
 IMPORT_DIRS = ('model', 'data', 'recommender', 'measurement')
 UPSTREAM_TEST_N = 88  # upstream test_dataloader: drop_last=True with batch 8 keeps the first 88 of 95
+
+
+def repo_path(path):
+    return os.path.abspath(path if os.path.isabs(path) else os.path.join(REPO, path))
+
+
+def protected_by(path):
+    for protected in PROTECTED:
+        root = repo_path(protected)  # abspath normalizes separators, so the comparison also holds on Windows
+        try:
+            if os.path.commonpath([os.path.abspath(path), root]) == root:
+                return protected
+        except ValueError:  # different drives
+            pass
+    return None
 
 
 def git(*args, binary=False):
@@ -215,12 +244,8 @@ def use_historical_test_collater(folder):
 
 
 def run_main(argv):
-    """Execute main.py as `python main.py <argv>` would, with the repository first on sys.path."""
+    """Execute main.py as `python main.py <argv>` would (the repository root is first on sys.path, see top)."""
     os.chdir(REPO)
-    if os.path.abspath(sys.path[0]) == os.path.dirname(os.path.abspath(__file__)):
-        sys.path[0] = REPO
-    elif REPO not in sys.path:
-        sys.path.insert(0, REPO)
     saved = sys.argv
     sys.argv = ['main.py'] + argv
     try:
@@ -268,12 +293,11 @@ def compare_with_reference(content, metrics):
 
 
 def evaluate(args):
-    ckpt = os.path.abspath(args.ckpt)
-    out_dir = os.path.abspath(args.out_dir or os.path.join(
-        REPO, 'runs', 'semantics_eval', f"{os.path.splitext(os.path.basename(ckpt))[0]}__{args.prompt_mode}"))
-    for protected in PROTECTED:
-        if os.path.commonpath([out_dir, os.path.join(REPO, protected)]) == os.path.join(REPO, protected):
-            raise SystemExit(f'--out_dir {out_dir} is inside {protected}/, which this script never writes to')
+    ckpt = repo_path(args.ckpt)
+    out_dir = repo_path(args.out_dir) if args.out_dir else os.path.join(
+        repo_path(args.out_root), f"{os.path.splitext(os.path.basename(ckpt))[0]}__{args.prompt_mode}")
+    if protected_by(out_dir):
+        raise SystemExit(f'{out_dir} is inside {protected_by(out_dir)}/, which this script never writes to')
     if os.path.exists(out_dir):
         raise SystemExit(f'{out_dir} exists; evaluation folders are never overwritten')
     if not os.path.isfile(ckpt):
@@ -290,7 +314,16 @@ def evaluate(args):
     if args.prompt_mode == 'aug2024_text_only':
         argv.remove('--export_gates')
     if args.dry_run:
-        print(json.dumps({'out_dir': out_dir, 'code': identity, 'main_py_argv': argv}, indent=2))
+        report = {'out_dir': out_dir, 'code': identity, 'main_py_argv': argv}
+        if args.prompt_mode == 'aug2024_text_only':
+            # check the historical blob and its import in a throw-away folder; out_dir is not created
+            scratch = tempfile.mkdtemp(prefix='eval_prompt_semantics_')
+            try:
+                use_historical_test_collater(materialize_historical(scratch))
+                report['historical_collater'] = dict(HISTORICAL, blob_verified=True, imported=HIST_MODULE)
+            finally:
+                shutil.rmtree(scratch)
+        print(json.dumps(report, indent=2))
         return 0
 
     watched = [ckpt] + [os.path.join(REPO, p) for p in (REFERENCE_METRICS, REFERENCE_TEST_CSV)]
@@ -365,7 +398,18 @@ def evaluate(args):
     return 0
 
 
-def summarize(root):
+def validation_metrics(ckpt_dir):
+    """Validation metric in the file name of every epoch checkpoint the training run saved."""
+    found = {}
+    for name in sorted(os.listdir(ckpt_dir)):
+        match = re.fullmatch(r'epoch=(\d+)-metric=(\d+\.\d+)\.ckpt', name)
+        if match:
+            found[name] = float(match.group(2))
+    return found
+
+
+def summarize(root, ckpt_dir):
+    root, ckpt_dir = repo_path(root), repo_path(ckpt_dir)
     results = []
     for name in sorted(os.listdir(root)):
         path = os.path.join(root, name, 'eval_result.json')
@@ -375,7 +419,10 @@ def summarize(root):
     for r in results:
         table.setdefault(r['checkpoint']['file'], {'checkpoint': r['checkpoint']})[r['prompt_mode']['name']] = r
     metric_of = {n: row['checkpoint']['val_metric_from_filename'] for n, row in table.items()}
-    best = max((n for n in metric_of if metric_of[n] is not None), key=lambda n: metric_of[n], default=None)
+    # best over all saved epoch checkpoints, evaluated here or not; ties are all marked
+    saved = validation_metrics(ckpt_dir)
+    top = max(saved.values(), default=None)
+    best = {n for n, v in saved.items() if v == top}
 
     def cell(row, mode, subset='all'):
         if mode not in row:
@@ -384,13 +431,25 @@ def summarize(root):
         return (f"{m['total']}/{m['valid']}/{m['correct']} VR={m['valid_ratio']:.4f} "
                 f"HR={m['hr_correct_over_valid']:.4f} c/N={m['correct_over_total']:.4f}")
 
-    lines = ['"best val" is chosen by the validation metric in the checkpoint file name only, never by a test result.', '',
+    def status(name):
+        if name in table:
+            return 'evaluated'
+        aliases = [n for n, row in table.items() if name in row['checkpoint']['identical_checkpoints']]
+        return f"evaluated as {', '.join(aliases)} (same bytes)" if aliases else 'not evaluated in this folder'
+
+    lines = ['best validation checkpoint: '
+             + ('; '.join(f'{n} (val metric {saved[n]}, {status(n)})' for n in sorted(best)) or 'none found'),
+             f'chosen by the validation metric in the file names of all epoch=*-metric=*.ckpt in '
+             f'{os.path.relpath(ckpt_dir, REPO) if ckpt_dir.startswith(REPO + os.sep) else ckpt_dir}/, '
+             'never by a test result:',
+             ', '.join(f'{n} {v}' for n, v in saved.items()) or 'none found', '',
              '| checkpoint | val metric (filename) | projector / LoRA / router BN-buffer keys | '
              'current-hybrid total/valid/correct | 2024-08-text-only total/valid/correct |', '|---|---|---|---|---|']
     for name in sorted(table, key=lambda n: (metric_of[n] is None, n)):
         row, ck = table[name], table[name]['checkpoint']
         same = ck['identical_checkpoints']
-        label = name + (' (best val)' if name == best else '') + (f" (= {', '.join(same)})" if same else '')
+        # only an epoch file named in `best` is marked; a byte copy such as last.ckpt is shown as "(= ...)"
+        label = name + (' (best val)' if name in best else '') + (f" (= {', '.join(same)})" if same else '')
         lines.append(f"| {label} | {ck['val_metric_from_filename']} | "
                      f"{ck['projector_keys']} / {ck['lora_keys']} / {ck['router_batchnorm_buffers']} | "
                      f"{cell(row, 'current_hybrid')} | {cell(row, 'aug2024_text_only')} |")
@@ -401,8 +460,11 @@ def summarize(root):
                      f"{cell(table[name], 'aug2024_text_only', f'first_{UPSTREAM_TEST_N}')} |")
     text = '\n'.join(lines)
     print(text)
-    with open(os.path.join(root, 'summary.md'), 'w') as f:
-        f.write(text + '\n')
+    if protected_by(root):
+        print(f'(summary.md not written: {root} is inside {protected_by(root)}/, which this script never writes to)')
+    else:
+        with open(os.path.join(root, 'summary.md'), 'w') as f:
+            f.write(text + '\n')
     return 0
 
 
@@ -410,15 +472,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--prompt_mode', choices=sorted(PROMPT_MODES))
     parser.add_argument('--ckpt')
-    parser.add_argument('--out_dir', help='new folder (default runs/semantics_eval/<checkpoint>__<prompt_mode>)')
+    parser.add_argument('--out_root', default=DEFAULT_OUT_ROOT,
+                        help='folder that receives <checkpoint>__<prompt_mode>/ (default %(default)s)')
+    parser.add_argument('--out_dir', help='new folder for this evaluation, overriding --out_root')
     parser.add_argument('--expect_reference', action='store_true',
                         help=f'fail unless {REFERENCE_METRICS} and the candidate sets of {REFERENCE_TEST_CSV} are reproduced')
     parser.add_argument('--allow_code_difference', action='store_true')
     parser.add_argument('--dry_run', action='store_true', help='print the main.py arguments and code check only')
     parser.add_argument('--summarize', metavar='ROOT')
+    parser.add_argument('--ckpt_dir', default='checkpoints/baseline',
+                        help='--summarize: folder whose epoch=*-metric=*.ckpt file names define the best validation epoch')
     args = parser.parse_args()
     if args.summarize:
-        sys.exit(summarize(args.summarize))
+        sys.exit(summarize(args.summarize, args.ckpt_dir))
     if not args.prompt_mode or not args.ckpt:
         parser.error('--prompt_mode and --ckpt are required')
     sys.exit(evaluate(args))
