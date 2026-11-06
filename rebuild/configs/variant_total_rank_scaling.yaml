@@ -1,0 +1,4 @@
+# variant_total_rank_scaling.yaml (D8 variant): scaling alpha/r instead of alpha/r*
+extends: paper_spec.yaml
+lora:
+  scaling_rule: total_rank

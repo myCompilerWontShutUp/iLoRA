@@ -1,0 +1,5 @@
+# variant_user_level_cluster.yaml (D25 variant): user-level clusters. cluster.artifact_dir is given
+# only on the command line: --set cluster.artifact_dir=<user-level cluster run>/cluster
+extends: cluster_hard.yaml
+cluster:
+  unit: user

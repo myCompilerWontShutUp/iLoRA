@@ -1,0 +1,4 @@
+# variant_all_hybrid.yaml (D3 variant): every train micro-batch uses the hybrid prompt
+extends: paper_spec.yaml
+prompt:
+  train_curriculum: all_hybrid
