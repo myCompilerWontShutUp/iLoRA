@@ -1,0 +1,4 @@
+# variant_released_label.yaml (D18 variant): labels include the second [BOS] of the released pair encoding
+extends: paper_spec.yaml
+batching:
+  label_mode: released_pair

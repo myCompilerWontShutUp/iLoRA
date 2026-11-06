@@ -1,0 +1,5 @@
+# variant_text_only_eval.yaml (E3, D4 variant): eval command only,
+#   --set eval.source_run=<E2 training run folder>
+extends: paper_spec.yaml
+prompt:
+  eval_prompt: text_only

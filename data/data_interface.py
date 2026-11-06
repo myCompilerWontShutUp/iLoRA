@@ -86,6 +86,7 @@ class TrainCollater:
                        "len_seq":torch.stack([torch.tensor(sample['len_seq']) for sample in batch], dim=0),
                        "len_cans":torch.stack([torch.tensor(sample['len_cans']) for sample in batch], dim=0),
                        "item_id": torch.stack([torch.tensor(sample['item_id']) for sample in batch], dim=0),
+                       "sample_idx": torch.stack([torch.tensor(sample['sample_idx']) for sample in batch], dim=0),
                        "flag":flag,
                        }
             
@@ -105,9 +106,10 @@ class TrainCollater:
                        "len_seq":torch.stack([torch.tensor(sample['len_seq']) for sample in batch], dim=0),
                        "len_cans":torch.stack([torch.tensor(sample['len_cans']) for sample in batch], dim=0),
                        "item_id": torch.stack([torch.tensor(sample['item_id']) for sample in batch], dim=0),
+                       "sample_idx": torch.stack([torch.tensor(sample['sample_idx']) for sample in batch], dim=0),
                        "correct_answer": targets_text,
                        "cans_name": cans_name,
-            
+
                        }
             
         return new_batch
@@ -150,13 +152,10 @@ class DInterface(pl.LightningDataModule):
                           collate_fn=TrainCollater(prompt_list=self.prompt_list,llm_tokenizer=self.llm_tokenizer,train=False))
 
     def test_dataloader(self):
-        return DataLoader(self.testset, 
-                          batch_size=self.batch_size, 
-                          num_workers=self.num_workers, 
+        return DataLoader(self.testset,
+                          batch_size=self.batch_size,
+                          num_workers=self.num_workers,
                           shuffle=False,
-                          
-                          drop_last=True,
-                          
                           collate_fn=TrainCollater(prompt_list=self.prompt_list,llm_tokenizer=self.llm_tokenizer,train=False))
 
     def load_data_module(self):

@@ -1,0 +1,5 @@
+# cluster_hard.yaml (E4). cluster.artifact_dir is given only on the command line:
+#   --set cluster.artifact_dir=<cluster run>/cluster   (ConfigError without it)
+extends: paper_spec.yaml
+router:
+  routing_mode: cluster_hard

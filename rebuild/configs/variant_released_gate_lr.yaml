@@ -1,0 +1,4 @@
+# variant_released_gate_lr.yaml (D19 variant): gate group lr x0.3 as in the released code
+extends: paper_spec.yaml
+train:
+  lr_scale_gate: 0.3

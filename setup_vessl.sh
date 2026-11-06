@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# VESSL environment setup for the exp/gate-cluster experiment.
+# Linux + a single A100 80GB GPU is assumed (spec section 14). This script is idempotent: running
+# it twice should not corrupt the environment. It never trains anything and never downloads the
+# Llama-2 model.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+echo "=== setup_vessl.sh ==="
+echo "[1/8] OS check"
+uname -a || echo "uname not available"
+if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "WARNING: this script is intended for the VESSL Linux instance; detected: $(uname -s)"
+fi
+
+echo "[2/8] Python version check"
+# Verified on the actual VESSL A100 instance: the base/system Python there is 3.14, which fails
+# to install requirements.txt (many pins, e.g. torch==2.0.0, predate Python 3.14 wheel support).
+# The verified fix is a dedicated conda env named `ilora` with Python 3.10. Check for that here
+# instead of letting `pip install -r requirements.txt` fail confusingly a few lines down.
+PY_VERSION="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+echo "  detected Python $PY_VERSION ($(python --version 2>&1))"
+if [[ "$PY_VERSION" != "3.10" ]]; then
+    echo "FATAL: this experiment requires Python 3.10 (verified on VESSL as Python 3.10.21)." >&2
+    echo "       Detected Python $PY_VERSION instead. Installing requirements.txt under this" >&2
+    echo "       interpreter is expected to fail. Create and activate a Python 3.10 conda" >&2
+    echo "       environment first, then re-run this script:" >&2
+    echo "         conda create -n ilora python=3.10 -y" >&2
+    echo "         conda activate ilora" >&2
+    echo "         bash setup_vessl.sh" >&2
+    exit 1
+fi
+
+echo "[3/8] GPU/CUDA check (informational only; scripts/preflight_vessl.sh enforces the hard gate)"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi || true
+else
+    echo "WARNING: nvidia-smi not found. This is expected on a CPU-only box but not on the VESSL A100 instance."
+fi
+
+echo "[4/8] Installing dependencies from requirements.txt (pinned versions, no upgrades applied)"
+python -m pip install -r requirements.txt   # the active env's pip, never another one on PATH
+
+echo "[5/8] bitsandbytes: use the CUDA runtime torch was built with, not the system CUDA"
+# bitsandbytes==0.37.2 otherwise picks up the image's CUDA 12.8 runtime (/usr/local/cuda/lib64),
+# looks for libbitsandbytes_cuda128.so, which it does not ship, and the import fails. See
+# scripts/setup_bnb_cuda_runtime.sh. Everything is derived from torch.version.cuda.
+if [[ -z "${CONDA_PREFIX:-}" ]]; then
+    echo "FATAL: run this inside the activated conda env (conda activate ilora)." >&2
+    exit 1
+fi
+bash scripts/setup_bnb_cuda_runtime.sh
+# shellcheck disable=SC1091
+source "$CONDA_PREFIX/etc/conda/activate.d/ilora_bnb_cuda.sh"   # apply to the rest of this run
+python scripts/verify_bnb_cuda.py
+
+echo "[6/8] Import smoke test (transformers / pytorch_lightning / vendored PEFT)"
+# Importing model.peft transitively imports model/peft/tuners/moelora.py, which does
+# `if is_bnb_available(): import bitsandbytes` at module load time. is_bnb_available() only
+# checks that the bitsandbytes package is on disk (importlib.util.find_spec), not that its native
+# extension actually loads -- a common failure mode when bitsandbytes==0.37.2 (pinned in
+# requirements.txt) is paired with a newer/older CUDA toolkit than it expects. This experiment
+# never uses 8-bit/4-bit loading, so this failure is unrelated to anything this experiment
+# actually needs, but a broken bitsandbytes import here would otherwise crash `import main` (and
+# therefore every training/eval command) the first time it is run. Catch it here, before any GPU
+# rental time is spent on preflight or training.
+if ! python -c "
+import sys
+try:
+    import transformers
+    import pytorch_lightning
+    sys.path.insert(0, '.')
+    import model.peft
+    print('[import smoke test] OK: transformers, pytorch_lightning, model.peft all import cleanly.')
+except Exception as e:
+    print(f'[import smoke test] FAILED: {type(e).__name__}: {e}', file=sys.stderr)
+    sys.exit(1)
+"; then
+    echo "FATAL: a required import failed. See the traceback above (this is often bitsandbytes" >&2
+    echo "       failing to load its native extension against this machine's CUDA runtime, or" >&2
+    echo "       the transformers debug-file workaround below not yet being applied)." >&2
+    exit 1
+fi
+
+echo "[7/8] Applying the transformers source patches this repository requires (README.md)"
+# debug/modeling_llama.py adds **kwargs to LlamaForCausalLM.forward and debug/utils.py allow-lists
+# user_embeds/gate_weights in GenerationMixin._validate_model_kwargs. Vanilla transformers 4.28.0
+# rejects those kwargs, so without both files training fails and every validation/test generate()
+# raises ValueError (the training-only benchmark never reaches generate()). Originals are kept
+# once as *.orig; re-running is a no-op.
+TRANSFORMERS_DIR="$(python -c 'import os, transformers; print(os.path.dirname(transformers.__file__))')"
+TRANSFORMERS_VERSION="$(python -c 'import transformers; print(transformers.__version__)')"
+if [[ "$TRANSFORMERS_VERSION" != "4.28.0" ]]; then
+    echo "FATAL: debug/*.py were written for transformers 4.28.0, found $TRANSFORMERS_VERSION." >&2
+    exit 1
+fi
+for pair in "debug/utils.py:generation/utils.py" "debug/modeling_llama.py:models/llama/modeling_llama.py"; do
+    SRC="${pair%%:*}"
+    DST="$TRANSFORMERS_DIR/${pair##*:}"
+    if cmp -s "$SRC" "$DST"; then
+        echo "  $DST already patched."
+    else
+        [[ -f "$DST.orig" ]] || cp "$DST" "$DST.orig"
+        cp "$SRC" "$DST"
+        echo "  patched $DST (original kept as $DST.orig)"
+    fi
+done
+if ! grep -q "'user_embeds', 'gate_weights'" "$TRANSFORMERS_DIR/generation/utils.py"; then
+    echo "FATAL: generation/utils.py does not allow-list user_embeds/gate_weights after patching." >&2
+    exit 1
+fi
+python -c "import transformers.generation.utils; from transformers import LlamaForCausalLM, LlamaTokenizer; print('  patched transformers imports OK')"
+
+echo "[8/8] Creating experiment output directories"
+mkdir -p checkpoints/baseline checkpoints/cluster_hard
+mkdir -p outputs/baseline outputs/cluster_hard
+mkdir -p results/baseline results/cluster_hard results/clustering
+mkdir -p artifacts
+mkdir -p logs
+
+echo "=== Installed versions ==="
+python -c "
+import torch
+print('torch', torch.__version__)
+print('cuda available', torch.cuda.is_available())
+try:
+    import transformers; print('transformers', transformers.__version__)
+except Exception as e:
+    print('transformers: NOT_RUN', e)
+try:
+    import pytorch_lightning as pl; print('pytorch_lightning', pl.__version__)
+except Exception as e:
+    print('pytorch_lightning: NOT_RUN', e)
+try:
+    import bitsandbytes; print('bitsandbytes', bitsandbytes.__version__)
+except Exception as e:
+    print('bitsandbytes: NOT_RUN', e)
+try:
+    import sklearn; print('scikit-learn', sklearn.__version__)
+except Exception as e:
+    print('scikit-learn: NOT_RUN', e)
+try:
+    import safetensors; print('safetensors', safetensors.__version__)
+except Exception as e:
+    print('safetensors: NOT_RUN', e)
+"
+
+echo "setup_vessl.sh done."
