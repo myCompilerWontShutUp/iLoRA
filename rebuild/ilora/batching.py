@@ -48,6 +48,7 @@ from transformers import LlamaTokenizer
 from . import run
 from .candidates import NUM_CANDIDATES, candidates_for
 from .data import HISTORY_LEN, PAD_ID, ItemCatalog, LoadedData, Sample, pad_histories
+from .datasets import for_template
 from .prompts import (BatchPlan, TemplateSet, build_prompt, check_catalog_titles, choose_template,
                       eval_is_hybrid)
 from .sections import BatchingConfig, PromptConfig
@@ -378,7 +379,7 @@ def _batch_common(samples: Sequence[Sample], cands: Sequence[tuple[int, ...]], t
             raise BatchingError(f"{kind}: {s.sample_id} candidates must be a tuple of {NUM_CANDS} ints, got {c!r}")
         if not _is_int(k) or k < 0:
             raise BatchingError(f"{kind}: {s.sample_id} template id must be an int >= 0, got {k!r}")
-    hist_ids, len_seq = pad_histories([s.history for s in samples], PAD_ITEM, HIST_LEN)   # M1 §5.6.13
+    hist_ids, len_seq = pad_histories([s.history for s in samples], samples[0].num_items, HIST_LEN)   # §5.6.13, D28
     cand_ids = torch.tensor([list(c) for c in cands], dtype=torch.int64)
     return hist_ids, len_seq, cand_ids
 
@@ -468,7 +469,8 @@ class PlannedTrainBatches(Dataset):
         if batching_cfg.label_mode not in LABEL_MODES:
             raise BatchingError(f"unknown batching.label_mode {batching_cfg.label_mode!r}, expected one of "
                                 f"{LABEL_MODES}")
-        check_catalog_titles(catalog)                       # M4 §8.6.2, once per dataset
+        forbidden = for_template(prompt_cfg.template_path).title_forbidden      # D39, §23.4
+        check_catalog_titles(catalog, forbidden)            # M4 §8.6.2, once per dataset
         self.plan = plan
         self.samples = tuple(samples)
         bad = sorted({j for e in plan.entries for j in e.sample_indices if not 0 <= j < len(self.samples)})
@@ -531,7 +533,8 @@ class EvalBatches(Dataset):
         if len(splits) != 1 or splits[0] not in EVAL_SPLITS or not all(isinstance(s, Sample) for s in samples):
             raise BatchingError(f"evaluation samples must all be Samples of one split in {EVAL_SPLITS}, got "
                                 f"splits {splits}")
-        check_catalog_titles(catalog)                       # M4 §8.6.2, once per dataset
+        forbidden = for_template(prompt_cfg.template_path).title_forbidden      # D39, §23.4
+        check_catalog_titles(catalog, forbidden)            # M4 §8.6.2, once per dataset
         self.samples = samples
         self.batch_size = batch_size
         self.groups = tuple(range(i, min(i + batch_size, len(samples))) for i in range(0, len(samples), batch_size))

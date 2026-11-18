@@ -1,20 +1,23 @@
 """M1 데이터 (DESIGN.md §5, §3.1 ``ItemCatalog``·``Sample``·``LoadedData``·``pad_histories``).
 
-Reads the four MovieLens100K files that LLaRA distributes and iLoRA uses
-unchanged (``data/ref/movielens/``: ``train_data.df``, ``Val_data.df``,
-``Test_data.df``, ``u.item``) and turns them into an ``ItemCatalog`` and
-``Sample`` tuples. ``load_dataset(cfg, repo_root)`` is the only way the other
-modules get samples (§5.6.12):
+Reads the four files of one dataset that LLaRA distributes and iLoRA uses
+unchanged (``train_data.df``, ``Val_data.df``, ``Test_data.df`` and the titles
+file, ``data/ref/movielens/u.item`` or ``data/ref/{steam,lastfm}/id2name.txt``,
+§23.2) and turns them into an ``ItemCatalog`` and ``Sample`` tuples.
+``load_dataset(cfg, repo_root)`` is the only way the other modules get samples
+(§5.6.12); the dataset values come from the ``DatasetSpec`` that
+``prompt.template_path`` selects (``datasets.spec_of``, §23.4):
 
-1. the sha256 of all four files is compared with ``run.EXPECTED_INPUTS``
+1. the sha256 of all four files is compared with ``run.expected_inputs(name)``
    before anything is unpickled (pickle can run code, §5.6.3 step 2),
-2. ``u.item`` titles are normalized as the released code does (``code``,
-   paper_spec) or with the minimal fixes of ``variant_fixed_titles``
-   (``fixed``), D20, §5.6.6,
+2. titles are normalized as the released code does: ``u.item`` with ``code``
+   (paper_spec) or the minimal fixes of ``variant_fixed_titles`` (``fixed``), D20,
+   §5.6.6; ``id2name.txt`` with ``code`` only, the stripped second ``::`` field (D38),
 3. each frame is projected to ``(seq, len_seq, next)`` (the ``cluster``
    column of the iLoRA copy is never read), its content fingerprint is
-   checked, rows are parsed strictly, pseudo users are assigned (D14,
-   §5.6.5), rows with ``len_seq < 3`` are dropped and the counts are checked,
+   checked, rows are parsed strictly in the layout of the spec (``(item,
+   rating)`` pairs or plain item ids, §23.2), pseudo users are assigned (D14,
+   D40, §5.6.5), rows with ``len_seq < 3`` are dropped (D42) and the counts are checked,
 4. ``data.subset == smoke`` selects the smoke subset (§5.6.7).
 
 pandas objects never leave this module, no file is written, and torch is
@@ -29,7 +32,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Optional, Sequence
 
@@ -37,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from . import run
+from .datasets import MOVIELENS, SPECS, SPLIT_FILES, DatasetSpec, spec_of
 from .seeding import np_rng
 
 if TYPE_CHECKING:
@@ -47,39 +51,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger("ilora.data")
 
 # ----------------------------------------------------------------------------
-# Constants (§5.6.1, §5.6.8: fixed rules, not config keys)
+# Constants (§5.6.1, §5.6.8: fixed rules, not config keys). The MovieLens values are aliases of
+# datasets.MOVIELENS (§23.4); functions of this module read them from their ``spec`` argument.
 # ----------------------------------------------------------------------------
-NUM_ITEMS: Final = 1682              # [LLaRA Table 1 p.7] 1,682 items, ids 0-1681
-PAD_ID: Final = 1682                 # [코드] U data/movielens_data.py:18
+NUM_ITEMS: Final = MOVIELENS.num_items   # 1682, [LLaRA Table 1 p.7] 1,682 items, ids 0-1681
+PAD_ID: Final = MOVIELENS.pad_id     # 1682, [코드] U data/movielens_data.py:18
 PAD_RATING: Final = 0                # [코드] U data/movielens_data.py:19
 HISTORY_LEN: Final = 10              # [LLaRA §5.1.1 p.7] "retain the last 10 interactions"
-MIN_LEN_SEQ: Final = 3               # [코드] U data/movielens_data.py:79 (no paper evidence)
+MIN_LEN_SEQ: Final = 3               # [코드] U data/movielens_data.py:79 (no paper evidence), same rule D42
 SPLITS: Final = ("train", "val", "test")
-DATA_DIR: Final = "data/ref/movielens"   # repository-relative, [코드] U train_movielens.sh:8
-SPLIT_FILES: Final = {"train": "train_data.df", "val": "Val_data.df", "test": "Test_data.df"}  # [코드] :52-57
-ITEM_FILE: Final = "u.item"          # [코드] U data/movielens_data.py:70
-USER_OFFSET: Final = {"train": 0, "val": 754, "test": 848}   # D14, §5.6.5
+DATA_DIR: Final = MOVIELENS.data_dir     # "data/ref/movielens", repository-relative, [코드] U train_movielens.sh:8
+ITEM_FILE: Final = MOVIELENS.item_file   # "u.item", [코드] U data/movielens_data.py:70
+USER_OFFSET: Final = MOVIELENS.user_offset   # {"train": 0, "val": 754, "test": 848}, D14, §5.6.5
 
 ITEM_ENCODING: Final = "ISO-8859-1"  # [코드] U data/movielens_data.py:71
 ITEM_FIELDS: Final = 24              # fields per u.item line (computed, §5.2)
+# id2name.txt (Steam, LastFM, §23.2, D38): U data/steam_data.py:71 leaves the locale default, which fails under cp949.
+ID2NAME_ENCODING: Final = "UTF-8"
+ID2NAME_SEPARATOR: Final = "::"      # [코드] U data/steam_data.py:73, U data/lastfm_data.py:65
 RATINGS: Final = (1, 2, 3, 4, 5)     # allowed rating values; the files hold only 3, 4, 5 (§5.6.2)
 TITLE_MODES: Final = ("code", "fixed")   # D20
 SUBSETS: Final = ("full", "smoke")       # D14
 FRAME_COLUMNS: Final = ("seq", "len_seq", "next")
 CLUSTER_COLUMN: Final = "cluster"    # iLoRA copy of train_data.df only; never read [SPEC §0.8, §7]
 
-# Expected counts (§5.6.2, §5.6.3 step 7, §5.6.5).
-EXPECTED_ROWS: Final = {"train": 68388, "val": 94, "test": 95}
-EXPECTED_SAMPLES: Final = {"train": 66126, "val": 94, "test": 95}
-TRAIN_USERS: Final = 754
+# Expected counts (§5.6.2, §5.6.3 step 7, §5.6.5), aliases of datasets.MOVIELENS.
+EXPECTED_ROWS: Final = MOVIELENS.expected_rows          # {"train": 68388, "val": 94, "test": 95}
+EXPECTED_SAMPLES: Final = MOVIELENS.expected_samples    # {"train": 66126, "val": 94, "test": 95}
+TRAIN_USERS: Final = MOVIELENS.train_users              # 754
 
-# Content fingerprints of (seq, len_seq, next), §5.6.9 (design/tmp/m1_fingerprint.py). The train
-# value is the same for the iLoRA copy (sha256 bac4c88b...) and the LLaRA copy (sha256 a73b119d...).
-EXPECTED_FINGERPRINTS: Final = {
-    "train": "85bafab832f1f78e5095b1fd880a418097054d3ea7dbb7d4fe9e1528f019aa99",
-    "val": "de7ac66b6703dc6935e1339183c00e08af2ad40f6d0877e7556b483a9aa65523",
-    "test": "01636285c16faf95cc7136bc937b9aa315c66de5e23fed5efec0e2b2e84dff09",
-}
+# Content fingerprints of (seq, len_seq, next), §5.6.9 (values and evidence in datasets.MOVIELENS).
+EXPECTED_FINGERPRINTS: Final = MOVIELENS.fingerprints
 
 # title_report categories (§5.6.6), the defects of the code normalization listed in §5.5.
 TITLE_REPORT_CATEGORIES: Final = ("article_an", "article_double_the", "article_in_parentheses", "empty",
@@ -112,23 +114,24 @@ def _is_py_int(value: Any) -> bool:
 # ----------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ItemCatalog:
-    """§3.1 ``ItemCatalog``: ``titles[i]`` is the normalized title of item id ``i`` (0-1681).
+    """§3.1 ``ItemCatalog``: ``titles[i]`` is the normalized title of item id ``i`` (0..num_items - 1).
 
     ``title_mode`` is ``code`` (paper_spec) or ``fixed`` (``variant_fixed_titles``), D20;
     M11 and M12 record which titles were judged.
     """
     titles: tuple[str, ...]
     title_mode: str
-    num_items: int                       # always 1682
-    pad_id: int                          # always 1682
+    num_items: int                       # the num_items of a known dataset (§23.4), 1682 for MovieLens
+    pad_id: int                          # always num_items ([코드] U main.py:142-147)
 
     def __post_init__(self) -> None:
         if not isinstance(self.titles, tuple):
             raise DataError(f"ItemCatalog.titles must be a tuple, got {type(self.titles).__name__}")
-        if self.num_items != NUM_ITEMS or not _is_py_int(self.num_items):
-            raise DataError(f"ItemCatalog.num_items must be {NUM_ITEMS}, got {self.num_items!r}")
-        if self.pad_id != PAD_ID or not _is_py_int(self.pad_id):
-            raise DataError(f"ItemCatalog.pad_id must be {PAD_ID}, got {self.pad_id!r}")
+        known = tuple(spec.num_items for spec in SPECS.values())
+        if self.num_items not in known or not _is_py_int(self.num_items):
+            raise DataError(f"ItemCatalog.num_items must be {' or '.join(map(str, known))}, got {self.num_items!r}")
+        if self.pad_id != self.num_items or not _is_py_int(self.pad_id):
+            raise DataError(f"ItemCatalog.pad_id must be {self.num_items}, got {self.pad_id!r}")
         if len(self.titles) != self.num_items:
             raise DataError(f"ItemCatalog needs {self.num_items} titles, got {len(self.titles)}")
         bad = [i for i, t in enumerate(self.titles) if not isinstance(t, str)]
@@ -144,16 +147,22 @@ class Sample:
 
     ``row`` is the row number of the released ``.df`` file before the
     ``len_seq`` filter (§5.6.4), ``user_id`` the pseudo user (D14),
-    ``history`` the unpadded window, oldest first, 3-10 items.
+    ``history`` the unpadded window, oldest first, 3-10 items. ``num_items`` is the
+    item count of its dataset and the id bound that M2 candidates, M4 prompts and M5
+    padding read (D28: carried by the sample so no call site can forget it); it takes
+    no part in equality or ``repr`` (§23.4).
     """
     split: str
     row: int
     user_id: int
     history: tuple[int, ...]
     target: int
+    num_items: int = field(default=NUM_ITEMS, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         where = f"sample {self.split!r} row {self.row!r}"
+        if not _is_py_int(self.num_items) or self.num_items < 1:
+            raise DataError(f"{where}: num_items must be an int >= 1, got {self.num_items!r}")
         if self.split not in SPLITS:
             raise DataError(f"{where}: split must be one of {SPLITS}")
         if not _is_py_int(self.row) or self.row < 0:
@@ -166,8 +175,9 @@ class Sample:
             raise DataError(f"{where}: history length {len(self.history)} is outside "
                             f"[{MIN_LEN_SEQ}, {HISTORY_LEN}]")
         for name, value in [*((f"history[{j}]", x) for j, x in enumerate(self.history)), ("target", self.target)]:
-            if not _is_py_int(value) or not 0 <= value < NUM_ITEMS:
-                raise DataError(f"{where}: {name} = {value!r} is not an item id (int 0-{NUM_ITEMS - 1}, bool excluded)")
+            if not _is_py_int(value) or not 0 <= value < self.num_items:
+                raise DataError(f"{where}: {name} = {value!r} is not an item id "
+                                f"(int 0-{self.num_items - 1}, bool excluded)")
         if len(set(self.history)) != len(self.history):
             raise DataError(f"{where}: history has a repeated item: {self.history}")
         if self.target in self.history:
@@ -237,24 +247,53 @@ class LoadedData:
 # ----------------------------------------------------------------------------
 # u.item and titles (§5.6.3 step 3, §5.6.6)
 # ----------------------------------------------------------------------------
-def read_raw_titles(path: Path) -> tuple[str, ...]:
-    """Raw ``u.item`` titles (field 1), index = item id = movie_id - 1.
+def _id2name_titles(path: Path, lines: Sequence[str], spec: DatasetSpec) -> tuple[str, ...]:
+    """The second ``::`` field of each ``id2name.txt`` line, not stripped; id = line index (D38, §23.2).
 
-    Text mode with universal newlines and ISO-8859-1 (``U data/movielens_data.py:71``),
-    so a CRLF checkout (Windows, core.autocrlf) and an LF checkout parse the same
-    (§4.6.5). The text is split on ``"\\n"`` only, not ``str.splitlines()``, which
-    would also break at ISO-8859-1 ``\\x85`` and other separators (§5.6.3).
+    ``ll = l.strip('\\n').split('::')``, ``ll[1]`` as ``U data/steam_data.py:73-74`` and
+    ``U data/lastfm_data.py:65-66`` read them. More fields are allowed only for the ids of
+    ``spec.extra_separator_ids`` (Steam 354, ``Depths of Fear :: Knossos``), so that a
+    title cut at an unexpected ``::`` cannot go unnoticed.
+    """
+    titles = []
+    for i, line in enumerate(lines):
+        fields = line.split(ID2NAME_SEPARATOR)
+        if len(fields) < 2:
+            raise DataError(f"{path} line {i + 1}: expected 'id{ID2NAME_SEPARATOR}title', got {line!r}")
+        if not _MOVIE_ID_RE.fullmatch(fields[0]) or int(fields[0]) != i:
+            raise DataError(f"{path} line {i + 1}: item id {fields[0]!r} != line index {i}")
+        if len(fields) > 2 and i not in spec.extra_separator_ids:
+            raise DataError(f"{path} line {i + 1}: {len(fields)} fields; a second '{ID2NAME_SEPARATOR}' is allowed "
+                            f"only for item ids {list(spec.extra_separator_ids)}: {line!r}")
+        titles.append(fields[1])
+    return tuple(titles)
+
+
+def read_raw_titles(path: Path, *, spec: DatasetSpec = MOVIELENS) -> tuple[str, ...]:
+    """Raw titles, index = item id: ``u.item`` field 1 (id = movie_id - 1) or the ``id2name`` title field (D38).
+
+    Text mode with universal newlines and ISO-8859-1 (``U data/movielens_data.py:71``)
+    or UTF-8 (id2name, D38), so a CRLF checkout (Windows, core.autocrlf) and an LF
+    checkout parse the same (§4.6.5). The text is split on ``"\\n"`` only, not
+    ``str.splitlines()``, which would also break at ISO-8859-1 ``\\x85`` and other
+    separators (§5.6.3). ``spec`` gives the file format and the expected line count (§23.4).
     """
     path = Path(path)
     if not path.is_file():
         raise DataError(f"{path}: file not found")
-    with open(path, "r", encoding=ITEM_ENCODING, newline=None) as f:
-        text = f.read()
+    encoding = ID2NAME_ENCODING if spec.item_format == "id2name" else ITEM_ENCODING
+    try:
+        with open(path, "r", encoding=encoding, newline=None) as f:
+            text = f.read()
+    except UnicodeDecodeError as exc:           # §5.6.10; ISO-8859-1 decodes every byte, only UTF-8 can get here
+        raise DataError(f"{path}: not valid {encoding} text: {exc}") from exc
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]                      # only the one empty element after the last newline
-    if len(lines) != NUM_ITEMS:
-        raise DataError(f"{path}: expected {NUM_ITEMS} lines, got {len(lines)}")
+    if len(lines) != spec.num_items:
+        raise DataError(f"{path}: expected {spec.num_items} lines, got {len(lines)}")
+    if spec.item_format == "id2name":
+        return _id2name_titles(path, lines, spec)
     titles = []
     for i, line in enumerate(lines):
         fields = line.split("|")                # [코드] U data/movielens_data.py:73
@@ -297,18 +336,23 @@ def fixed_title(raw: str) -> str:
     return s
 
 
-def build_catalog(raw_titles: Sequence[str], title_mode: str) -> ItemCatalog:
-    """``ItemCatalog`` from the raw ``u.item`` titles with ``code`` or ``fixed`` normalization (D20)."""
-    if title_mode not in TITLE_MODES:
-        raise DataError(f"title_mode must be one of {TITLE_MODES}, got {title_mode!r}")
-    if len(raw_titles) != NUM_ITEMS:
-        raise DataError(f"expected {NUM_ITEMS} raw titles, got {len(raw_titles)}")
+def build_catalog(raw_titles: Sequence[str], title_mode: str, *, spec: DatasetSpec = MOVIELENS) -> ItemCatalog:
+    """``ItemCatalog`` from the raw titles: ``u.item`` with ``code`` or ``fixed`` normalization (D20),
+    ``id2name`` with ``code`` only, ``str.strip`` of the raw field (D38, ``U data/steam_data.py:74``,
+    ``U data/lastfm_data.py:66``; ``spec.title_modes`` refuses ``fixed`` there)."""
+    if title_mode not in spec.title_modes:
+        raise DataError(f"title_mode must be one of {spec.title_modes}, got {title_mode!r}")
+    if len(raw_titles) != spec.num_items:
+        raise DataError(f"expected {spec.num_items} raw titles, got {len(raw_titles)}")
     bad = [i for i, t in enumerate(raw_titles) if not isinstance(t, str)]
     if bad:
         raise DataError(f"raw titles must be str, item ids {bad[:10]} are not")
-    normalize = code_title if title_mode == "code" else fixed_title
+    if spec.item_format == "id2name":
+        normalize = str.strip
+    else:
+        normalize = code_title if title_mode == "code" else fixed_title
     return ItemCatalog(titles=tuple(normalize(t) for t in raw_titles), title_mode=title_mode,
-                       num_items=NUM_ITEMS, pad_id=PAD_ID)
+                       num_items=spec.num_items, pad_id=spec.pad_id)
 
 
 def _paren_depth(text: str, pos: int) -> int:
@@ -386,19 +430,24 @@ def project_frame(obj: object, split: str) -> pd.DataFrame:
     return obj.loc[:, list(FRAME_COLUMNS)].copy()
 
 
-def frame_fingerprint(df: pd.DataFrame) -> str:
+def frame_fingerprint(df: pd.DataFrame, *, spec: DatasetSpec = MOVIELENS) -> str:
     """Content fingerprint of ``(seq, len_seq, next)`` (§5.6.9).
 
     One line per unfiltered row ``p``: ``json.dumps([p, [[item, rating] x 10], len_seq,
     [next_item, next_rating]], separators=(",", ":"))``; lines joined by ``"\\n"``,
-    sha256 of the UTF-8 text. Other columns (``cluster``) are not included.
+    sha256 of the UTF-8 text. Other columns (``cluster``) are not included. Without
+    ratings (``spec.has_ratings`` False, Steam and LastFM): ``json.dumps([p, [item x 10],
+    len_seq, next], separators=(",", ":"))`` (§23.2 hash table).
     """
     lines = []
     for p, (seq, len_seq, nxt) in enumerate(zip(df["seq"].tolist(), df["len_seq"].tolist(),
                                                  df["next"].tolist())):
         try:
-            entry = [p, [[int(item), int(rating)] for item, rating in seq], int(len_seq),
-                     [int(nxt[0]), int(nxt[1])]]
+            if spec.has_ratings:
+                entry = [p, [[int(item), int(rating)] for item, rating in seq], int(len_seq),
+                         [int(nxt[0]), int(nxt[1])]]
+            else:
+                entry = [p, [int(item) for item in seq], int(len_seq), int(nxt)]
         except (TypeError, ValueError, IndexError) as exc:
             raise DataError(f"fingerprint: row {p} is not (seq, len_seq, next) of integers: {exc}") from exc
         lines.append(json.dumps(entry, separators=(",", ":")))
@@ -412,93 +461,117 @@ def _pair(value: Any, where: str) -> tuple[int, int]:
     return int(value[0]), int(value[1])
 
 
-def _check_item_rating(item: int, rating: int, where: str) -> None:
-    if not 0 <= item < NUM_ITEMS:
-        raise DataError(f"{where}: item id {item} is outside 0-{NUM_ITEMS - 1}")
-    if rating not in RATINGS:
+def _entry(value: Any, where: str, spec: DatasetSpec) -> tuple[int, Optional[int]]:
+    """``(item, rating)`` of a ``seq`` or ``next`` entry; a layout without ratings gives ``(item, None)`` (§23.2)."""
+    if spec.has_ratings:
+        return _pair(value, where)
+    if not _is_int(value):
+        raise DataError(f"{where}: expected an integer item id, got {value!r}")
+    return int(value), None
+
+
+def _check_item_rating(item: int, rating: Optional[int], where: str, spec: DatasetSpec) -> None:
+    if not 0 <= item < spec.num_items:
+        raise DataError(f"{where}: item id {item} is outside 0-{spec.num_items - 1}")
+    if spec.has_ratings and rating not in RATINGS:
         raise DataError(f"{where}: rating {rating} is not in 1-5")
 
 
-def parse_rows(df: pd.DataFrame, split: str) -> tuple[RawRow, ...]:
+def parse_rows(df: pd.DataFrame, split: str, *, spec: DatasetSpec = MOVIELENS) -> tuple[RawRow, ...]:
     """Parse a projected frame row by row (§5.6.2, §5.6.10).
 
-    ``seq`` is a list of 10 ``(item, rating)`` tuples; padding ``(1682, 0)`` only on
-    the right (left or middle padding is an error, ``U data/movielens_data.py:80-88``
-    removed it without checking positions); real items 0-1681 with rating 1-5;
-    ``len_seq == max(1, k)`` with k real items; ``next`` an ``(item, rating)`` tuple with
-    item 0-1681 (1682 is never a target). Ratings are dropped (``:95-101``).
+    ``seq`` is a list of 10 ``(item, rating)`` tuples (MovieLens) or 10 plain item ids
+    (``spec.has_ratings`` False, Steam and LastFM, §23.2); padding ``(pad_id, 0)`` or the
+    plain ``pad_id`` (MovieLens 1682, Steam 3581, LastFM 4606) only on the right (left or
+    middle padding is an error, ``U data/movielens_data.py:80-88`` removed it without
+    checking positions); real items below ``num_items``, with rating 1-5 where the layout
+    has ratings; ``len_seq == max(1, k)`` with k real items; ``next`` an ``(item, rating)``
+    tuple or a plain id with an item below ``num_items`` (the padding id is never a
+    target). Ratings are dropped (``:95-101``).
     """
     _check_split(split)
     missing = [c for c in FRAME_COLUMNS if c not in df.columns]
     if missing:
         raise DataError(f"{split}: missing columns {missing}")
+    entries_text = "(item, rating) tuples" if spec.has_ratings else "integer item ids"
+    pad_text = f"({spec.pad_id}, {PAD_RATING})" if spec.has_ratings else str(spec.pad_id)
+    pad_entry = (spec.pad_id, PAD_RATING if spec.has_ratings else None)
     rows = []
     for p, (seq, len_seq, nxt) in enumerate(zip(df["seq"].tolist(), df["len_seq"].tolist(),
                                                  df["next"].tolist())):
         where = f"{split} row {p}"
         if not isinstance(seq, list) or len(seq) != HISTORY_LEN:
-            raise DataError(f"{where}: seq must be a list of {HISTORY_LEN} (item, rating) tuples, got {seq!r}")
+            raise DataError(f"{where}: seq must be a list of {HISTORY_LEN} {entries_text}, got {seq!r}")
         history: list[int] = []
         padded = False
         for j, entry in enumerate(seq):
-            item, rating = _pair(entry, f"{where} seq[{j}]")
-            if (item, rating) == (PAD_ID, PAD_RATING):
+            item, rating = _entry(entry, f"{where} seq[{j}]", spec)
+            if (item, rating) == pad_entry:
                 padded = True
                 continue
             if padded:
-                raise DataError(f"{where}: seq[{j}] = {entry!r} follows padding; padding (1682, 0) must be on "
-                                f"the right only (left or middle padding): {seq!r}")
-            _check_item_rating(item, rating, f"{where} seq[{j}]")
+                raise DataError(f"{where}: seq[{j}] = {entry!r} follows padding; padding "
+                                f"{pad_text} must be on the right only (left or middle "
+                                f"padding): {seq!r}")
+            _check_item_rating(item, rating, f"{where} seq[{j}]", spec)
             history.append(item)
         if not _is_int(len_seq):
             raise DataError(f"{where}: len_seq must be an integer, got {len_seq!r}")
         k = len(history)
         if int(len_seq) != max(1, k):
             raise DataError(f"{where}: len_seq {int(len_seq)} != max(1, k) = {max(1, k)} for k = {k} real items")
-        target, rating = _pair(nxt, f"{where} next")
-        _check_item_rating(target, rating, f"{where} next")
+        target, rating = _entry(nxt, f"{where} next", spec)
+        _check_item_rating(target, rating, f"{where} next", spec)
         rows.append(RawRow(row=p, len_seq=int(len_seq), history=tuple(history), target=target))
     return tuple(rows)
 
 
-def assign_users(rows: Sequence[RawRow], split: str) -> tuple[int, ...]:
-    """Pseudo user ids (D14, §5.6.5), one per row.
+def assign_users(rows: Sequence[RawRow], split: str, *, spec: DatasetSpec = MOVIELENS) -> tuple[int, ...]:
+    """Pseudo user ids (D14, D40, §5.6.5), one per row.
 
     train (rows before the filter, file order): row ``p`` starts a new block when
     ``p = 0`` or ``history[p] != (history[p-1] + (target[p-1],))[-10:]``; the user id
-    is the block number. Every block must start with an empty history and its
-    windows must have lengths 0, 1, 2, ..., 10, 10, .... Validation and test: one
-    row = one user, ``754 + row`` and ``848 + row``.
+    is the block number. With ``spec.first_window_empty`` (MovieLens, LastFM) every block
+    must start with an empty history and its windows have lengths 0, 1, 2, ..., 10, 10, ...;
+    without it (Steam, D40) the first window has any length ``h0`` and the window at
+    position ``i`` must have length ``min(h0 + i, 10)``. Validation and test: one row =
+    one user, ``spec.user_offset[split] + row`` (MovieLens ``754 + row`` and ``848 + row``).
     """
     _check_split(split)
+    offset = spec.user_offset[split]
     if split != "train":
-        return tuple(USER_OFFSET[split] + r.row for r in rows)
+        return tuple(offset + r.row for r in rows)
     users: list[int] = []
     block = -1
     position = 0
+    first_length = 0                            # h0, the history length of the block's first window (D40)
     previous: Optional[RawRow] = None
     for r in rows:
         if previous is None or r.history != (previous.history + (previous.target,))[-HISTORY_LEN:]:
             block += 1
             position = 0
-            if r.history:
+            first_length = len(r.history)
+            if r.history and spec.first_window_empty:
                 raise DataError(f"train row {r.row}: block {block} does not start with an empty history "
                                 f"(history {r.history}, the previous row does not continue into it)")
         else:
             position += 1
-        if len(r.history) != min(position, HISTORY_LEN):
+        expected = min(first_length + position, HISTORY_LEN)
+        if len(r.history) != expected:
             raise DataError(f"train row {r.row}: window {position} of block {block} has length "
-                            f"{len(r.history)}, expected {min(position, HISTORY_LEN)}")
-        users.append(USER_OFFSET["train"] + block)
+                            f"{len(r.history)}, expected {expected}")
+        users.append(offset + block)
         previous = r
     return tuple(users)
 
 
-def to_samples(rows: Sequence[RawRow], users: Sequence[int], split: str) -> tuple[Sample, ...]:
+def to_samples(rows: Sequence[RawRow], users: Sequence[int], split: str, *,
+               spec: DatasetSpec = MOVIELENS) -> tuple[Sample, ...]:
     """``Sample`` tuple of the rows that pass ``len_seq >= MIN_LEN_SEQ``, in row order (§5.6.3 step 6).
 
     The filter (``U data/movielens_data.py:79``) only drops rows; ``row`` keeps the
     unfiltered number (§5.6.4). Kept rows have ``len(history) == len_seq``.
+    ``Sample.num_items`` is ``spec.num_items`` (D28).
     """
     _check_split(split)
     if len(rows) != len(users):
@@ -513,28 +586,30 @@ def to_samples(rows: Sequence[RawRow], users: Sequence[int], split: str) -> tupl
             continue
         if len(r.history) != r.len_seq:
             raise DataError(f"{split} row {r.row}: history length {len(r.history)} != len_seq {r.len_seq}")
-        out.append(Sample(split=split, row=r.row, user_id=user, history=r.history, target=r.target))
+        out.append(Sample(split=split, row=r.row, user_id=user, history=r.history, target=r.target,
+                          num_items=spec.num_items))
     return tuple(out)
 
 
 # ----------------------------------------------------------------------------
 # Loading (§5.6.3)
 # ----------------------------------------------------------------------------
-def _verified_paths(repo_root: Path) -> dict[str, Path]:
-    """Steps 1-2: the four files exist and their sha256 equals ``run.EXPECTED_INPUTS``.
+def _verified_paths(repo_root: Path, *, spec: DatasetSpec = MOVIELENS) -> dict[str, Path]:
+    """Steps 1-2: the four files exist and their sha256 equals ``run.expected_inputs(spec.name)``.
 
     All four are checked before any file is unpickled (pickle can execute code).
-    ``u.item`` is hashed after CRLF -> LF normalization (the ``is_text`` flag of the table).
+    The text files are hashed after CRLF -> LF normalization (the ``is_text`` flag of the table).
     """
+    table = run.expected_inputs(spec.name)
     paths = {}
-    for name in (*SPLIT_FILES.values(), ITEM_FILE):
-        rel = f"{DATA_DIR}/{name}"
+    for name in (*SPLIT_FILES.values(), spec.item_file):
+        rel = f"{spec.data_dir}/{name}"
         path = Path(repo_root) / rel
         if not path.is_file():
             raise DataError(f"{rel}: file not found under {repo_root}")
-        if rel not in run.EXPECTED_INPUTS:
+        if rel not in table:
             raise DataError(f"{rel}: no expected sha256 in run.EXPECTED_INPUTS")
-        expected, is_text = run.EXPECTED_INPUTS[rel]
+        expected, is_text = table[rel]
         got = run.content_sha256(path, is_text)
         if got != expected:
             raise DataError(f"{rel}: sha256 {got} != expected {expected} (file not read)")
@@ -553,44 +628,52 @@ def _check_smoke_sizes(sizes: Sequence[int], n_train_users: int, n_val: int, n_t
 
 
 def load_dataset(cfg: "Config", repo_root: Path) -> LoadedData:
-    """The only path to the samples (§5.6.3, §5.6.12). ``cfg.data`` and, for smoke, ``cfg.run.seed``."""
+    """The only path to the samples (§5.6.3, §5.6.12). ``cfg.data``, the dataset of ``prompt.template_path``
+    (D27, §23.4) and, for smoke, ``cfg.run.seed``."""
     repo_root = Path(repo_root)
-    paths = _verified_paths(repo_root)                                       # steps 1-2
-    raw_titles = read_raw_titles(paths[ITEM_FILE])                           # step 3
-    catalog = build_catalog(raw_titles, cfg.data.title_mode)
+    spec = spec_of(cfg)
+    paths = _verified_paths(repo_root, spec=spec)                            # steps 1-2
+    raw_titles = read_raw_titles(paths[spec.item_file], spec=spec)           # step 3
+    catalog = build_catalog(raw_titles, cfg.data.title_mode, spec=spec)
     samples: dict[str, tuple[Sample, ...]] = {}
     summary: dict[str, dict[str, int]] = {}
     for split in SPLITS:
         frame = project_frame(pd.read_pickle(paths[SPLIT_FILES[split]]), split)   # step 4
-        fingerprint = frame_fingerprint(frame)                               # step 5
-        if fingerprint != EXPECTED_FINGERPRINTS[split]:
+        fingerprint = frame_fingerprint(frame, spec=spec)                    # step 5
+        if fingerprint != spec.fingerprints[split]:
             raise DataError(f"{split}: content fingerprint {fingerprint} != expected "
-                            f"{EXPECTED_FINGERPRINTS[split]} (pandas/numpy unpickling differs?)")
-        rows = parse_rows(frame, split)                                      # step 6
-        users = assign_users(rows, split)
-        kept = to_samples(rows, users, split)
+                            f"{spec.fingerprints[split]} (pandas/numpy unpickling differs?)")
+        rows = parse_rows(frame, split, spec=spec)                           # step 6
+        users = assign_users(rows, split, spec=spec)
+        kept = to_samples(rows, users, split, spec=spec)
         n_users = len({s.user_id for s in kept})
-        if len(rows) != EXPECTED_ROWS[split] or len(kept) != EXPECTED_SAMPLES[split]:   # step 7
+        if len(rows) != spec.expected_rows[split] or len(kept) != spec.expected_samples[split]:   # step 7
             raise DataError(f"{split}: {len(rows)} rows / {len(kept)} samples, expected "
-                            f"{EXPECTED_ROWS[split]} / {EXPECTED_SAMPLES[split]}")
-        if split == "train" and (len(set(users)) != TRAIN_USERS or n_users != TRAIN_USERS):
+                            f"{spec.expected_rows[split]} / {spec.expected_samples[split]}")
+        if split == "train" and (len(set(users)) != spec.train_blocks or n_users != spec.train_users):
+            expected = (str(spec.train_users) if spec.train_blocks == spec.train_users   # MovieLens, LastFM: one number
+                        else f"{spec.train_blocks} blocks and {spec.train_users} users with samples")   # Steam, D40
             raise DataError(f"train: {len(set(users))} blocks and {n_users} users with samples, "
-                            f"expected {TRAIN_USERS}")
+                            f"expected {expected}")
         samples[split] = kept
         summary[split] = {"rows": len(rows), "samples": len(kept), "users": n_users}
     data = LoadedData(catalog=catalog, train=samples["train"], val=samples["val"], test=samples["test"],
                       subset="full", smoke_users=None)
     # §5.6.8: smoke_users is range-checked also for full (every key is required by M0).
-    sizes = _check_smoke_sizes(cfg.data.smoke_users, TRAIN_USERS, len(data.val), len(data.test))
+    sizes = _check_smoke_sizes(cfg.data.smoke_users, spec.train_users, len(data.val), len(data.test))
     if cfg.data.subset == "smoke":                                           # step 8
-        data = select_smoke(data, cfg.run.seed, sizes, train_rows=tuple(cfg.data.train_rows))
+        data = select_smoke(data, cfg.run.seed, sizes, train_rows=tuple(cfg.data.train_rows), spec=spec)
     elif cfg.data.subset != "full":
         raise DataError(f"data.subset must be one of {SUBSETS}, got {cfg.data.subset!r}")
-    report = title_report(raw_titles)                                        # step 9
+    # step 9; title_report covers the u.item normalization only (§5.6.6, §23.5), id2name titles are recorded in §23.2
+    report = title_report(raw_titles) if spec.item_format == "uitem" else None
     logger.info("data: %s", ", ".join(f"{s} rows {v['rows']} -> samples {v['samples']} (users {v['users']})"
                                      for s, v in summary.items()))
-    logger.info("data: title_mode=%s, code title defects %s", catalog.title_mode,
-                {name: len(ids) for name, ids in report.items()})
+    if report is not None:
+        logger.info("data: title_mode=%s, code title defects %s", catalog.title_mode,
+                    {name: len(ids) for name, ids in report.items()})
+    else:
+        logger.info("data: title_mode=%s", catalog.title_mode)
     if data.subset == "smoke":
         logger.info("data: smoke subset %s (train_rows %s): train %d samples of %d users, val rows %s, "
                     "test rows %s", data.smoke_users, list(cfg.data.train_rows) or "none", len(data.train),
@@ -599,7 +682,7 @@ def load_dataset(cfg: "Config", repo_root: Path) -> LoadedData:
 
 
 def select_smoke(data: LoadedData, main_seed: int, sizes: tuple[int, int, int], *,
-                 train_rows: tuple[int, ...]) -> LoadedData:
+                 train_rows: tuple[int, ...], spec: DatasetSpec = MOVIELENS) -> LoadedData:
     """Smoke subset of the full data (D14, §5.6.7). ``row`` and ``user_id`` are kept.
 
     train: ``users = sorted(train user ids)``, ``pick = np_rng(seed, "smoke_users",
@@ -609,6 +692,7 @@ def select_smoke(data: LoadedData, main_seed: int, sizes: tuple[int, int, int], 
     key is not used; each row must be a train sample after the filter and the
     samples must have ``sizes[0]`` distinct users. val/test: ``pick = np_rng(seed,
     "smoke_users", split).choice(N, size=n, replace=False)`` positions, in row order.
+    ``spec`` is only named in the row-range message (§23.4).
     """
     if data.subset != "full":
         raise DataError(f"select_smoke selects from the full data, got subset {data.subset!r}")
@@ -622,7 +706,7 @@ def select_smoke(data: LoadedData, main_seed: int, sizes: tuple[int, int, int], 
         missing = [r for r in rows if r not in by_row]
         if missing:
             raise DataError(f"train_rows {missing} are not train samples: rows removed by the len_seq >= "
-                            f"{MIN_LEN_SEQ} filter or outside train_data.df (0-{EXPECTED_ROWS['train'] - 1})")
+                            f"{MIN_LEN_SEQ} filter or outside train_data.df (0-{spec.expected_rows['train'] - 1})")
         train = tuple(by_row[r] for r in rows)
         chosen = {s.user_id for s in train}
         if len(chosen) != n_train:
@@ -647,8 +731,9 @@ def pad_histories(histories: Sequence[Sequence[int]], pad_id: int, length: int
     """``(hist_ids [N, length], len_seq [N])``, CPU contiguous int64, right padding with ``pad_id``.
 
     ``hist_ids[i] = list(h) + [pad_id] * (length - len(h))``, ``len_seq[i] = len(h)``.
-    Callers pass ``PAD_ID`` (1682) and ``HISTORY_LEN`` (10): M5 collate, M3
-    ``encode_all`` and M12 ``compute_representations`` share this one rule.
+    Callers pass the padding id of their dataset (``Sample.num_items``, MovieLens 1682) and
+    ``HISTORY_LEN`` (10): M5 collate, M3 ``encode_all`` and M12 ``compute_representations`` share
+    this one rule.
     """
     import torch
 
@@ -679,7 +764,8 @@ def pad_histories(histories: Sequence[Sequence[int]], pad_id: int, length: int
 
 __all__ = [
     "NUM_ITEMS", "PAD_ID", "PAD_RATING", "HISTORY_LEN", "MIN_LEN_SEQ", "SPLITS", "DATA_DIR", "SPLIT_FILES",
-    "ITEM_FILE", "USER_OFFSET", "ITEM_ENCODING", "ITEM_FIELDS", "RATINGS", "TITLE_MODES", "SUBSETS",
+    "ITEM_FILE", "USER_OFFSET", "ITEM_ENCODING", "ITEM_FIELDS", "ID2NAME_ENCODING", "ID2NAME_SEPARATOR", "RATINGS",
+    "TITLE_MODES", "SUBSETS",
     "FRAME_COLUMNS", "CLUSTER_COLUMN", "EXPECTED_ROWS", "EXPECTED_SAMPLES", "TRAIN_USERS",
     "EXPECTED_FINGERPRINTS", "TITLE_REPORT_CATEGORIES", "DataError", "ItemCatalog", "Sample", "RawRow",
     "LoadedData", "read_raw_titles", "code_title", "fixed_title", "build_catalog", "title_report",

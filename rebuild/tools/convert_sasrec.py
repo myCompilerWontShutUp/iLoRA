@@ -1,15 +1,17 @@
-"""SASRec pickle 변환 도구 (DESIGN.md §7.6.1, §7.6.2; M3).
+"""SASRec pickle 변환 도구 (DESIGN.md §7.6.1, §7.6.2, §23.5 M3; M3).
 
     python -I rebuild/tools/convert_sasrec.py --repo <repository root> --out runs/rebuild/assets/sasrec
+    python -I rebuild/tools/convert_sasrec.py --repo <repository root> --dataset steam --out runs/rebuild/assets/sasrec_steam
 
-Converts the whole-module pickle ``rec_model/movielens.pt`` (git blob ``41c057dc``,
-``U`` = ``L``) once into
+Converts the whole-module pickle of one dataset (``--dataset``, default ``movielens``:
+``rec_model/movielens.pt``, git blob ``41c057dc``, ``U`` = ``L``; ``steam`` and ``lastfm``
+are ``rec_model/steam.pt`` and ``rec_model/lastfm.pt`` of §23.2, D36) once into
 
-- ``sasrec_movielens_state.pt``: a plain dict read with ``torch.load(weights_only=True)``
+- ``sasrec_<dataset>_state.pt``: a plain dict read with ``torch.load(weights_only=True)``
   (``format``, ``arch``, 20 float32 tensors, ``dropped_keys``, ``source``, ``digest``, §7.6.2),
-- ``sasrec_movielens_reference.pt``: outputs of the ORIGINAL code, ``cacul_h`` for every
-  sample with ``len_seq >= 3`` (66,315, per split in chunks of ``REF_CHUNK`` with
-  ``REF_THREADS`` CPU thread) and ``cacu_x`` for every item (1,682),
+- ``sasrec_<dataset>_reference.pt``: outputs of the ORIGINAL code, ``cacul_h`` for every
+  sample with ``len_seq >= 3`` (MovieLens 66,315, per split in chunks of ``REF_CHUNK`` with
+  ``REF_THREADS`` CPU thread) and ``cacu_x`` for every item (MovieLens 1,682),
 - ``manifest.json``: provenance, the 18 pickle globals and the observed pickle state.
 
 The original class code comes from pinned blobs of the upstream commit through git, never
@@ -36,6 +38,7 @@ import tempfile
 import types
 import warnings
 import zipfile
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any, Mapping, Optional, Sequence
@@ -50,6 +53,7 @@ import torch  # noqa: E402
 from torch import nn  # noqa: E402
 
 from ilora import run  # noqa: E402
+from ilora.datasets import SPECS, DatasetSpec  # noqa: E402
 from ilora.sasrec import (  # noqa: E402
     REFERENCE_FILE_KEYS, SASREC_REFERENCE_FORMAT, SASREC_STATE_FORMAT, SASRecArch, expected_state_shapes,
     load_sasrec_state, state_digest,
@@ -137,6 +141,64 @@ def _say(message: str) -> None:
 
 
 # ----------------------------------------------------------------------------
+# Per-dataset pins (§23.2, §23.5 M3, D36): one table, built at call time
+# ----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class DatasetPins:
+    """What the tool pins for one dataset (§7.6.1 steps 3, 7, 9 and 12; §23.2, D36, D42)."""
+    pickle_path: str                          # repository-relative pickle, sasrec.source_path (§7.6.7, D36)
+    pickle_blob: str                          # git blob of the pickle (§23.2)
+    pickle_sha256: str                        # SHA-256 of the pickle (§23.2)
+    data_dir: str                             # folder of the split files, the keys of run.expected_inputs
+    expected_samples: Mapping[str, int]       # step 9: rows with len_seq >= MIN_LEN_SEQ per split (§23.2, D42)
+    has_ratings: bool                         # step 9: seq holds (item, rating) pairs or plain ids (§23.2 행 형식)
+    arch: SASRecArch                          # step 7; item_num is also the padding id ([코드] U main.py:142-147)
+    attributes: Mapping[str, Any]             # step 7: observed attributes of the pickled module
+    dropped_shapes: Mapping[str, list[int]]   # step 12: s_fc tensors left out of the state file (§7.5)
+    state_file: str                           # step 12 output names (§23.5 M3)
+    reference_file: str
+
+    @property
+    def dropped_keys(self) -> tuple[str, ...]:
+        return tuple(sorted(self.dropped_shapes))
+
+
+def _pins_from_spec(spec: DatasetSpec, blob: str, sha256: str) -> DatasetPins:
+    """Steam and LastFM: paths, counts and the row layout of ``ilora.datasets`` (D28), the structure of the
+    MovieLens pickle with another ``item_num`` (D36, measured multi/sasrec_prompts/check_ckpts_arch.py)."""
+    arch = replace(EXPECTED_ARCH, item_num=spec.num_items)
+    return DatasetPins(
+        pickle_path=spec.sasrec_source, pickle_blob=blob, pickle_sha256=sha256, data_dir=spec.data_dir,
+        expected_samples=spec.expected_samples, has_ratings=spec.has_ratings, arch=arch,
+        attributes={**EXPECTED_ATTRIBUTES, "item_num": {"type": "int", "value": spec.num_items}},
+        dropped_shapes={"s_fc.bias": [spec.num_items], "s_fc.weight": [spec.num_items, arch.hidden_size]},
+        state_file=f"sasrec_{spec.name}_state.pt", reference_file=f"sasrec_{spec.name}_reference.pt")
+
+
+def dataset_pins(dataset: str = "movielens") -> DatasetPins:
+    """The pins of ``dataset``: the one table of per-dataset values (§23.5 M3).
+
+    Built at every call so that the MovieLens row reads the module constants above by name: the
+    default path keeps its values and every monkeypatch of them (tests/test_m3_convert.py: PICKLE_BLOB,
+    PICKLE_SHA256). The Steam and LastFM blobs and sha256 are §23.2 (multi/sasrec_prompts/scan_ckpts.py).
+    """
+    table = {
+        "movielens": DatasetPins(
+            pickle_path=PICKLE_PATH, pickle_blob=PICKLE_BLOB, pickle_sha256=PICKLE_SHA256, data_dir=DATA_DIR,
+            expected_samples=EXPECTED_SAMPLES, has_ratings=SPECS["movielens"].has_ratings, arch=EXPECTED_ARCH,
+            attributes=EXPECTED_ATTRIBUTES, dropped_shapes=DROPPED_SHAPES,
+            state_file=STATE_FILE, reference_file=REFERENCE_FILE),
+        "steam": _pins_from_spec(SPECS["steam"], "db78403205868f67c8214820ac9dd05c3f44205d",
+                                 "752c0cd11a8646adca10025b5746dfcb8968967a6104546f6f869a3ebf26609b"),
+        "lastfm": _pins_from_spec(SPECS["lastfm"], "4cad4b22cdcbf3e7cc959409af803f5d975a9941",
+                                  "6f94253543e0ca3b0bbd42b4f6b94f2c97c9fdfdd36c3b5ad3f6b576a806dd86"),
+    }
+    if dataset not in table:
+        raise ConversionError(f"unknown dataset {dataset!r}, expected one of {list(table)}")
+    return table[dataset]
+
+
+# ----------------------------------------------------------------------------
 # git and hashes
 # ----------------------------------------------------------------------------
 def git_blob_id(data: bytes) -> str:
@@ -196,16 +258,17 @@ def materialize_original_sources(repo: Path, dest: Path) -> dict[str, str]:
     return written
 
 
-def check_pickle_file(pt_path: Path) -> dict[str, Any]:
-    """Step 3: git blob id and SHA-256 of the pickle equal the pinned values."""
+def check_pickle_file(pt_path: Path, *, dataset: str = "movielens") -> dict[str, Any]:
+    """Step 3: git blob id and SHA-256 of the pickle equal the pinned values of ``dataset``."""
+    pins = dataset_pins(dataset)
     if not pt_path.is_file():
         raise ConversionError(f"{pt_path} not found")
     raw = pt_path.read_bytes()
     blob, sha256 = git_blob_id(raw), hashlib.sha256(raw).hexdigest()
-    if blob != PICKLE_BLOB or sha256 != PICKLE_SHA256:
+    if blob != pins.pickle_blob or sha256 != pins.pickle_sha256:
         raise ConversionError(f"{pt_path}: git blob {blob} / sha256 {sha256} differ from the pinned "
-                              f"blob {PICKLE_BLOB} / sha256 {PICKLE_SHA256}")
-    return {"path": PICKLE_PATH, "git_blob": blob, "sha256": sha256, "size": len(raw)}
+                              f"blob {pins.pickle_blob} / sha256 {pins.pickle_sha256}")
+    return {"path": pins.pickle_path, "git_blob": blob, "sha256": sha256, "size": len(raw)}
 
 
 # ----------------------------------------------------------------------------
@@ -384,8 +447,10 @@ def describe_original_model(model: nn.Module) -> dict:
     }
 
 
-def check_observed(observed: Mapping[str, Any]) -> None:
-    """Step 7: every observed value equals the design expectation (§7.4); otherwise refuse."""
+def check_observed(observed: Mapping[str, Any], *, dataset: str = "movielens") -> None:
+    """Step 7: every observed value equals the design expectation of ``dataset`` (§7.4, §23.2); otherwise refuse."""
+    pins = dataset_pins(dataset)
+    arch = pins.arch
     problems: list[str] = []
 
     def expect(label: str, got: Any, want: Any) -> None:
@@ -393,28 +458,28 @@ def check_observed(observed: Mapping[str, Any]) -> None:
             problems.append(f"{label}: observed {got!r}, expected {want!r}")
 
     expect("type", observed["type"], EXPECTED_MODEL_TYPE)
-    for key, want in EXPECTED_ATTRIBUTES.items():
+    for key, want in pins.attributes.items():
         expect(f"attribute {key}", observed["attributes"].get(key), want)
     expect("submodules", observed["submodules"], EXPECTED_SUBMODULES)
     expect("dropout p", observed["dropout_p"], {name: EXPECTED_DROPOUT_P for name in DROPOUT_MODULES})
     expect("layernorm", observed["layernorm"],
-           {name: {"eps": EXPECTED_ARCH.layernorm_eps, "elementwise_affine": True,
-                   "normalized_shape": [EXPECTED_ARCH.hidden_size]} for name in LAYERNORM_MODULES})
+           {name: {"eps": arch.layernorm_eps, "elementwise_affine": True,
+                   "normalized_shape": [arch.hidden_size]} for name in LAYERNORM_MODULES})
     expect("attention", observed["attention"],
-           {"mh_attn": {"num_heads": EXPECTED_ARCH.num_heads, "hidden_size": EXPECTED_ARCH.hidden_size}})
+           {"mh_attn": {"num_heads": arch.num_heads, "hidden_size": arch.hidden_size}})
     expect("conv1d", observed["conv1d"], {name: EXPECTED_CONV1D for name in ("feed_forward.w_1", "feed_forward.w_2")})
-    h = EXPECTED_ARCH.hidden_size
+    h = arch.hidden_size
     expect("linear", observed["linear"],
            {**{f"mh_attn.linear_{p}": {"in_features": h, "out_features": h, "bias": True} for p in "qkv"},
-            "s_fc": {"in_features": h, "out_features": EXPECTED_ARCH.item_num, "bias": True}})
+            "s_fc": {"in_features": h, "out_features": arch.item_num, "bias": True}})
     expect("embedding", observed["embedding"], {
-        "item_embeddings": {"num_embeddings": {"type": "int64", "value": EXPECTED_ARCH.item_num + 1},
+        "item_embeddings": {"num_embeddings": {"type": "int64", "value": arch.item_num + 1},
                             "embedding_dim": h, "padding_idx": None, "max_norm": None},
-        "positional_embeddings": {"num_embeddings": {"type": "int64", "value": EXPECTED_ARCH.state_size},
+        "positional_embeddings": {"num_embeddings": {"type": "int64", "value": arch.state_size},
                                   "embedding_dim": h, "padding_idx": None, "max_norm": None}})
     expect("softmax", observed["softmax"], {"mh_attn.softmax": {"dim": -1}})
-    shapes = {name: list(shape) for name, shape in expected_state_shapes(EXPECTED_ARCH).items()}
-    shapes.update(DROPPED_SHAPES)
+    shapes = {name: list(shape) for name, shape in expected_state_shapes(arch).items()}
+    shapes.update(pins.dropped_shapes)
     expect("state tensors", {s["name"]: (s["shape"], s["dtype"]) for s in observed["state"]},
            {name: (shape, "float32") for name, shape in shapes.items()})
     expect("number of state tensors", len(observed["state"]), 22)
@@ -436,22 +501,31 @@ def arch_of(model: nn.Module) -> SASRecArch:
 # ----------------------------------------------------------------------------
 # Reference samples and outputs (steps 9-11)
 # ----------------------------------------------------------------------------
-def read_reference_samples(data_dir: Path) -> dict[str, tuple[list[str], torch.Tensor, torch.Tensor]]:
+def _plain_item_id(entry: Any, where: str) -> int:
+    """One ``seq`` entry of a layout without ratings (§23.2): an integer id, no pair and no bool."""
+    if isinstance(entry, (bool, np.bool_)) or not isinstance(entry, (int, np.integer)):
+        raise ConversionError(f"{where}: expected a plain integer item id, got {entry!r}")
+    return int(entry)
+
+
+def read_reference_samples(data_dir: Path, *, dataset: str = "movielens"
+                           ) -> dict[str, tuple[list[str], torch.Tensor, torch.Tensor]]:
     """Step 9: ``split -> (sample_ids, hist_ids [n, 10] int64, len_seq [n] int64)`` read with pandas.
 
-    Independent of M1: the released ``.df`` files are hashed (``run.EXPECTED_INPUTS``) before
+    Independent of M1: the released ``.df`` files are hashed (``run.expected_inputs(dataset)``) before
     they are unpickled; every row with ``len_seq >= 3`` in row order, ``sample_id = "{split}:{row}"``
-    (``row`` = row of the file before the filter), item ids = first element of each ``seq`` pair,
-    right padding with the padding id checked.
+    (``row`` = row of the file before the filter), item ids = first element of each ``seq`` pair, or the
+    ``seq`` entries themselves when the dataset has no ratings (§23.2), right padding with the padding id checked.
     """
-    pad, length = EXPECTED_ARCH.item_num, EXPECTED_ARCH.state_size
+    pins = dataset_pins(dataset)
+    pad, length = pins.arch.item_num, pins.arch.state_size
     out: dict[str, tuple[list[str], torch.Tensor, torch.Tensor]] = {}
     for split, name in SPLIT_FILES:
-        rel = f"{DATA_DIR}/{name}"
+        rel = f"{pins.data_dir}/{name}"
         path = Path(data_dir) / name
         if not path.is_file():
             raise ConversionError(f"{path} not found")
-        expected, is_text = run.EXPECTED_INPUTS[rel]
+        expected, is_text = run.expected_inputs(dataset)[rel]
         got = run.content_sha256(path, is_text)
         if got != expected:
             raise ConversionError(f"{rel}: sha256 {got} != expected {expected} (not unpickled)")
@@ -463,7 +537,10 @@ def read_reference_samples(data_dir: Path) -> dict[str, tuple[list[str], torch.T
             n = int(len_seq)
             if n < MIN_LEN_SEQ:
                 continue
-            ids = [int(pair[0]) for pair in seq]
+            if pins.has_ratings:
+                ids = [int(pair[0]) for pair in seq]
+            else:
+                ids = [_plain_item_id(entry, f"{split} row {row}") for entry in seq]
             if len(ids) != length or not n <= length:
                 raise ConversionError(f"{split} row {row}: seq has {len(ids)} entries and len_seq {n}, expected {length}")
             if any(not 0 <= x < pad for x in ids[:n]) or any(x != pad for x in ids[n:]):
@@ -471,9 +548,9 @@ def read_reference_samples(data_dir: Path) -> dict[str, tuple[list[str], torch.T
             sample_ids.append(f"{split}:{row}")
             rows.append(ids)
             lengths.append(n)
-        if len(sample_ids) != EXPECTED_SAMPLES[split]:
+        if len(sample_ids) != pins.expected_samples[split]:
             raise ConversionError(f"{split}: {len(sample_ids)} samples with len_seq >= {MIN_LEN_SEQ}, "
-                                  f"expected {EXPECTED_SAMPLES[split]}")
+                                  f"expected {pins.expected_samples[split]}")
         out[split] = (sample_ids, torch.tensor(rows, dtype=torch.int64), torch.tensor(lengths, dtype=torch.int64))
     return out
 
@@ -537,15 +614,16 @@ def _ensure_empty_out(out_dir: Path) -> None:
             raise ConversionError(f"output folder {out_dir} exists and is not empty; refusing to overwrite (4.6.3)")
 
 
-def write_outputs(out_dir: Path, state: dict, reference: dict, manifest: dict) -> None:
+def write_outputs(out_dir: Path, state: dict, reference: dict, manifest: dict, *, dataset: str = "movielens") -> None:
     """Step 12: state file, reference file, then ``manifest.json`` (with the two file sha256), each written
     under a temporary name and renamed. The two ``.pt`` files hold only tensors, str, int, float, list
     and dict, so ``torch.load(weights_only=True)`` reads them."""
+    pins = dataset_pins(dataset)
     out_dir = Path(out_dir)
     _ensure_empty_out(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     outputs = {}
-    for name, obj in ((STATE_FILE, state), (REFERENCE_FILE, reference)):
+    for name, obj in ((pins.state_file, state), (pins.reference_file, reference)):
         tmp = out_dir / f"{name}.tmp"
         torch.save(obj, tmp)
         os.replace(tmp, out_dir / name)
@@ -553,20 +631,22 @@ def write_outputs(out_dir: Path, state: dict, reference: dict, manifest: dict) -
     run.write_json_atomic(out_dir / MANIFEST_FILE, {**manifest, "outputs": outputs})
 
 
-def _reread(out_dir: Path, digest: str, n_samples: int) -> None:
+def _reread(out_dir: Path, digest: str, n_samples: int, *, dataset: str = "movielens") -> None:
     """Both files load with weights_only=True and pass the runtime reader of ``ilora.sasrec``."""
-    load_sasrec_state(out_dir / STATE_FILE, digest)
-    ref = torch.load(out_dir / REFERENCE_FILE, map_location="cpu", weights_only=True)
+    pins = dataset_pins(dataset)
+    load_sasrec_state(out_dir / pins.state_file, digest)
+    ref = torch.load(out_dir / pins.reference_file, map_location="cpu", weights_only=True)
     if (set(ref) != set(REFERENCE_FILE_KEYS) or ref["format"] != SASREC_REFERENCE_FORMAT
             or ref["state_digest"] != digest or len(ref["sample_ids"]) != n_samples):
-        raise ConversionError(f"{out_dir / REFERENCE_FILE} does not read back as written")
+        raise ConversionError(f"{out_dir / pins.reference_file} does not read back as written")
 
 
 # ----------------------------------------------------------------------------
 # Entry
 # ----------------------------------------------------------------------------
-def convert(repo: Path, out_dir: Path) -> dict[str, Any]:
-    """Steps 1-12 of §7.6.1; returns the manifest."""
+def convert(repo: Path, out_dir: Path, *, dataset: str = "movielens") -> dict[str, Any]:
+    """Steps 1-12 of §7.6.1 for one dataset (§23.5 M3); returns the manifest."""
+    pins = dataset_pins(dataset)
     _ensure_empty_out(out_dir)
     require_upstream_commit(repo)                                                      # 1
     out_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -575,29 +655,29 @@ def convert(repo: Path, out_dir: Path) -> dict[str, Any]:
         src_dir = Path(tmp)
         blobs = materialize_original_sources(repo, src_dir)                            # 2
         _say(f"original sources from {UPSTREAM_COMMIT[:7]}: {blobs}")
-        pt_path = repo / PICKLE_PATH
-        pickle_info = check_pickle_file(pt_path)                                       # 3
+        pt_path = repo / pins.pickle_path
+        pickle_info = check_pickle_file(pt_path, dataset=dataset)                      # 3
         found = scan_pickle_globals(pt_path)                                           # 4
         check_globals(found)
         pickle_info.update({"zip_record": pickle_record_name(pt_path),
                             "globals": [list(g) for g in sorted(found)],
                             "find_class_allow_list": [list(g) for g in sorted(EXPECTED_GLOBALS - {FLOAT_STORAGE})]})
-        _say(f"pickle {PICKLE_PATH}: sha256 {pickle_info['sha256']}, {len(found)} globals as expected")
+        _say(f"pickle {pins.pickle_path}: sha256 {pickle_info['sha256']}, {len(found)} globals as expected")
         original = import_original_module(src_dir)                                     # 5
         model = load_original_model(pt_path, original)                                 # 6
         observed = describe_original_model(model)                                      # 7
-        check_observed(observed)
+        check_observed(observed, dataset=dataset)
         arch = arch_of(model)
-        if arch != EXPECTED_ARCH:
-            raise ConversionError(f"architecture {arch} != expected {EXPECTED_ARCH}")
+        if arch != pins.arch:
+            raise ConversionError(f"architecture {arch} != expected {pins.arch}")
         model.device = torch.device("cpu")     # 8: cacul_h moves its input to self.device (U ...:203-204)
         model.eval()
         still_training = [name for name, m in model.named_modules() if m.training]
         if still_training:
             raise ConversionError(f"modules still in training mode after eval(): {still_training}")
 
-        data_dir = repo / DATA_DIR
-        samples = read_reference_samples(data_dir)                                     # 9
+        data_dir = repo / pins.data_dir
+        samples = read_reference_samples(data_dir, dataset=dataset)                    # 9
         _say("reference samples: " + ", ".join(f"{s} {len(v[0])}" for s, v in samples.items()))
         z_ref = {split: compute_reference(model, hist, lens) for split, (_, hist, lens) in samples.items()}   # 10
         item_ids = torch.arange(arch.item_num, dtype=torch.int64)
@@ -608,13 +688,14 @@ def convert(repo: Path, out_dir: Path) -> dict[str, Any]:
 
         full_state = model.state_dict()
         dropped = sorted(key for key in full_state if key not in expected_state_shapes(arch))
-        if tuple(dropped) != DROPPED_KEYS:
-            raise ConversionError(f"dropped keys {dropped} != {list(DROPPED_KEYS)}")
+        if tuple(dropped) != pins.dropped_keys:
+            raise ConversionError(f"dropped keys {dropped} != {list(pins.dropped_keys)}")
         kept = {key: full_state[key].detach().to("cpu").clone().contiguous() for key in expected_state_shapes(arch)}
         digest = state_digest(kept)
         state = {"format": SASREC_STATE_FORMAT, "arch": arch.as_dict(), "state_dict": kept,
-                 "dropped_keys": list(DROPPED_KEYS),
-                 "source": {"path": PICKLE_PATH, "git_blob": pickle_info["git_blob"], "sha256": pickle_info["sha256"]},
+                 "dropped_keys": list(pins.dropped_keys),
+                 "source": {"path": pins.pickle_path, "git_blob": pickle_info["git_blob"],
+                            "sha256": pickle_info["sha256"]},
                  "digest": digest}
         order = [split for split, _ in SPLIT_FILES]
         reference = {
@@ -641,28 +722,32 @@ def convert(repo: Path, out_dir: Path) -> dict[str, Any]:
             "observed": observed,
             "arch": arch.as_dict(),
             "state": {"format": SASREC_STATE_FORMAT, "digest": digest, "n_tensors": len(kept),
-                      "n_values": sum(t.numel() for t in kept.values()), "dropped": dict(DROPPED_SHAPES)},
+                      "n_values": sum(t.numel() for t in kept.values()), "dropped": dict(pins.dropped_shapes)},
             "reference": {"format": SASREC_REFERENCE_FORMAT, "chunk": REF_CHUNK, "num_threads": REF_THREADS,
                           "counts": {split: len(samples[split][0]) for split in order},
                           "total": len(reference["sample_ids"]), "z_shape": list(reference["z"].shape),
                           "item_emb_shape": list(item_emb.shape)},
             "self_check": checks,
-            "data": {f"{DATA_DIR}/{name}": run.content_sha256(data_dir / name) for _, name in SPLIT_FILES},
+            "data": {f"{pins.data_dir}/{name}": run.content_sha256(data_dir / name) for _, name in SPLIT_FILES},
             "versions": {"python": platform.python_version(), "torch": torch.__version__,
                          "numpy": np.__version__, "pandas": pd.__version__},
         }
-    write_outputs(out_dir, state, reference, manifest)                                 # 12
-    _reread(out_dir, digest, len(reference["sample_ids"]))
+    write_outputs(out_dir, state, reference, manifest, dataset=dataset)                # 12
+    _reread(out_dir, digest, len(reference["sample_ids"]), dataset=dataset)
     return manifest
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="convert_sasrec.py",
-        description="Convert rec_model/movielens.pt once into the plain SASRec state, the original-code "
-                    "reference outputs and manifest.json (rebuild/DESIGN.md 7.6.1).")
+        description="Convert the released SASRec pickle of one dataset (rec_model/<dataset>.pt) once into the plain "
+                    "SASRec state, the original-code reference outputs and manifest.json (rebuild/DESIGN.md 7.6.1, "
+                    "23.5 M3).")
     parser.add_argument("--repo", type=Path, default=run.REPO_ROOT,
                         help="repository root with the full git history (default: the one holding this tool)")
+    parser.add_argument("--dataset", choices=tuple(SPECS), default="movielens",
+                        help="dataset to convert: selects the pickle, the data folder, the expected sizes and the "
+                             "output names sasrec_<dataset>_{state,reference}.pt (default: movielens)")
     parser.add_argument("--out", type=Path, required=True,
                         help="output folder, absolute or relative to --repo, e.g. runs/rebuild/assets/sasrec; "
                              "must not exist or be empty")
@@ -677,11 +762,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         with warnings.catch_warnings():
             # torch 2.0.0's loader touches TypedStorage and warns that it is deprecated (torch-internal)
             warnings.filterwarnings("ignore", message="TypedStorage is deprecated", category=UserWarning)
-            manifest = convert(repo, out_dir.resolve())
+            manifest = convert(repo, out_dir.resolve(), dataset=args.dataset)
     except ConversionError as exc:
         print(f"convert_sasrec: refused: {exc}", file=sys.stderr, flush=True)
         return 1
-    _say(f"wrote {STATE_FILE}, {REFERENCE_FILE} and {MANIFEST_FILE} to {out_dir}: state digest "
+    pins = dataset_pins(args.dataset)
+    _say(f"wrote {pins.state_file}, {pins.reference_file} and {MANIFEST_FILE} to {out_dir}: state digest "
          f"{manifest['state']['digest']}, {manifest['reference']['total']} reference rows")
     return 0
 

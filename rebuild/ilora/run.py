@@ -63,6 +63,26 @@ EXPECTED_INPUTS: dict[str, tuple[str, bool]] = {
     "rec_model/movielens.pt": ("6928a06778d0e5b64ead0641501f73f13beb2c61ca2d881ee15582630d101df9", False),
 }
 
+# The same table for the other datasets (DESIGN.md §23.2 hash table, D28, D33, D36, D37); only id2name.txt
+# and the template are text files. The working-tree files are pinned; Steam Val_data.df comes from
+# F babe9ec and is absent from U (D33, §23.10 O2).
+EXPECTED_INPUTS_STEAM: dict[str, tuple[str, bool]] = {
+    "data/ref/steam/train_data.df": ("90f8e2ec827427d271cf0b03db45ed5ac3231840fbd022ac57cfae6061ed5b63", False),
+    "data/ref/steam/Val_data.df": ("84cd6a73ffea7e64e88e0c01357e01ffc7492fac3870dcccb417939c82fc764b", False),
+    "data/ref/steam/Test_data.df": ("2766b9faf90e3531a35207c01fbef2f655af97c21a6ba7d18581bbef2bc6ad59", False),
+    "data/ref/steam/id2name.txt": ("dada06a1306c36c91fb1ee3f980df7bee894024b3f52d20832ec2340524d7b7b", True),
+    "prompt/game.txt": ("cdc7f7160d5e6beac2c31449540b55525cc069c5aa70277c0ca307a544f4b7b3", True),
+    "rec_model/steam.pt": ("752c0cd11a8646adca10025b5746dfcb8968967a6104546f6f869a3ebf26609b", False),
+}
+EXPECTED_INPUTS_LASTFM: dict[str, tuple[str, bool]] = {
+    "data/ref/lastfm/train_data.df": ("7db71a60d3da4c449091fbc254efc9602f81eec6eb9a60534811ccd61974dbc1", False),
+    "data/ref/lastfm/Val_data.df": ("92a1ddb65ebdeff999f910b65660eb3d8c7cd85e6a19308d80c429481839f8b3", False),
+    "data/ref/lastfm/Test_data.df": ("cac058a2842b2a3ed4d39ed1fa0a742f5034a23c9851a2ffc157b4845d703570", False),
+    "data/ref/lastfm/id2name.txt": ("b608bcf14300b1608ccd88f4fe240e6345125201ecdb55157395c19787fe4eaf", True),
+    "prompt/artist.txt": ("0b85e0e091281f96460942e177273757a540a7f3b3743b500f53ea37e4288094", True),
+    "rec_model/lastfm.pt": ("6f94253543e0ca3b0bbd42b4f6b94f2c97c9fdfdd36c3b5ad3f6b576a806dd86", False),
+}
+
 # Strings that must never reach meta.json or logs.
 _SECRET_VALUE_RE = re.compile(
     r"(hf_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
@@ -131,9 +151,25 @@ def rebuild_file_hashes(rebuild_dir: Path = REBUILD_DIR) -> dict[str, str]:
     return out
 
 
-def input_hashes(repo_root: Path = REPO_ROOT) -> dict[str, Optional[str]]:
+def expected_inputs(dataset: str = "movielens") -> dict[str, tuple[str, bool]]:
+    """The expected input table of ``dataset`` (DESIGN.md §23.4, D28): ``rel path -> (sha256, is_text)``.
+
+    The module attributes are read at call time, so a test that patches ``run.EXPECTED_INPUTS``
+    (tests/test_m0_config_run.py:212, :632) reaches ``input_hashes`` and ``check_environment``. For
+    run-time checks only: the config cross checks bind their tables at import time (§23.4).
+    """
+    if dataset == "movielens":
+        return EXPECTED_INPUTS
+    if dataset == "steam":
+        return EXPECTED_INPUTS_STEAM
+    if dataset == "lastfm":
+        return EXPECTED_INPUTS_LASTFM
+    raise ValueError(f"no expected input table for dataset {dataset!r}")
+
+
+def input_hashes(repo_root: Path = REPO_ROOT, dataset: str = "movielens") -> dict[str, Optional[str]]:
     out = {}
-    for rel, (_, is_text) in EXPECTED_INPUTS.items():
+    for rel, (_, is_text) in expected_inputs(dataset).items():
         path = repo_root / rel
         out[rel] = content_sha256(path, is_text) if path.exists() else None
     return out
@@ -477,14 +513,15 @@ def transformers_integrity_problems() -> list[str]:
 
 
 def check_environment(*, require_gpu: bool, llm_path: Optional[Path], check_inputs: bool = True,
-                      repo_root: Path = REPO_ROOT, require_llm: bool = False) -> None:
+                      repo_root: Path = REPO_ROOT, require_llm: bool = False, dataset: str = "movielens") -> None:
     """Raise EnvironmentCheckError listing every problem found (DESIGN.md §4.6.5).
 
     Always: torch 2.0.0, transformers 4.28.0 (D13), REQUIRED_LIBRARIES, transformers
     install integrity. ``require_gpu``: CUDA available, exactly one visible GPU
     (SPEC §0.12), GPU 0 memory >= 75 GiB. ``llm_path``: LLaMA folder (config.json
     ``torch_dtype`` float16, shards, tokenizer.model); ``require_llm`` makes a
-    missing ``llm_path`` (LLM_PATH not set) a problem. ``check_inputs``: input hashes.
+    missing ``llm_path`` (LLM_PATH not set) a problem. ``check_inputs``: the input
+    hashes of ``expected_inputs(dataset)`` (§23.4).
     """
     problems: list[str] = []
     try:
@@ -521,7 +558,7 @@ def check_environment(*, require_gpu: bool, llm_path: Optional[Path], check_inpu
         problems.append("LLM_PATH is not set: the profile needs the LLaMA folder (model.backbone llama2_7b)")
 
     if check_inputs:
-        for rel, (expected, is_text) in EXPECTED_INPUTS.items():
+        for rel, (expected, is_text) in expected_inputs(dataset).items():
             path = repo_root / rel
             if not path.exists():
                 problems.append(f"missing input {rel}")

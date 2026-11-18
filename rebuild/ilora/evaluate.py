@@ -51,6 +51,7 @@ from . import run
 from .batching import EvalBatch, EvalBatches, TokenizerBundle, make_loader
 from .candidates import FLAG_NAMES, NUM_CANDIDATES, candidate_flags, candidates_for, match_norm
 from .data import EXPECTED_SAMPLES, ItemCatalog, LoadedData, Sample
+from .datasets import DatasetSpec, spec_of
 from .precision import autocast_for
 from .prompts import TemplateSet, choose_template, eval_is_hybrid, load_templates
 
@@ -756,10 +757,11 @@ def _write_json(path: Path, obj: object) -> str:
     return run.content_sha256(path)
 
 
-def _expected_size(data: LoadedData, split: str) -> int:
-    """15.6.2 step 1: full -> val 94 / test 95 (D17), smoke -> the chosen user count of that split (D14)."""
+def _expected_size(data: LoadedData, split: str, spec: DatasetSpec) -> int:
+    """15.6.2 step 1: full -> the split size of the dataset (MovieLens val 94 / test 95, D17), smoke -> the chosen
+    user count of that split (D14)."""
     if data.subset == "full":
-        return FULL_SPLIT_SIZE[split]
+        return spec.expected_samples[split]
     if data.subset == "smoke" and data.smoke_users is not None:
         return int(data.smoke_users[SMOKE_SPLIT_INDEX[split]])
     raise EvalError(f"data.subset {data.subset!r} with smoke_users {data.smoke_users!r} has no expected size")
@@ -823,7 +825,8 @@ def _metrics_meta(model: Any, bundle: TokenizerBundle, data: LoadedData, cfg: "C
     dev, mc, ids = model.device, cfg.model, bundle.ids
     counts = Counter(r.template_id for r in gen.records)
     return {
-        "git_commit": git.get("commit"), "git_dirty": git.get("dirty"), "seed": cfg.run.seed, "dataset": "movielens",
+        "git_commit": git.get("commit"), "git_dirty": git.get("dirty"), "seed": cfg.run.seed,
+        "dataset": spec_of(cfg).name,
         "routing_mode": cfg.router.routing_mode, "num_experts": cfg.lora.num_experts, "lora_r": cfg.lora.r,
         "epochs": cfg.train.epochs, "lr_peak": cfg.train.lr_peak, "micro_batch_size": cfg.train.micro_batch_size,
         "grad_accum": cfg.train.grad_accum, "num_candidates": cfg.candidates.num_candidates,
@@ -894,15 +897,15 @@ def evaluate_split(model: Any, bundle: TokenizerBundle, data: LoadedData, split:
     started_utc, t0 = run.utc_now(), time.perf_counter()
     split, ckpt_tag = _check_split(split), _check_tag(ckpt_tag)
     samples = data.samples(split)
-    want = _expected_size(data, split)
+    want = _expected_size(data, split, spec_of(cfg))
     if len(samples) != want:
         raise EvalError(f"{split} has {len(samples)} samples, expected {want} for data.subset {data.subset} "
                         f"(D17: the whole split, D14 smoke)")
     _check_cudnn()
     if ckpt_meta is not None and not isinstance(ckpt_meta, Mapping):
         raise EvalError(f"ckpt_meta must be a mapping or None, got {type(ckpt_meta).__name__}")
-    if templates is None:
-        templates = load_templates(run.resolve_path(cfg.prompt.template_path))      # M4 8.6.2, REPO_ROOT relative
+    if templates is None:                                   # M4 8.6.2, REPO_ROOT relative
+        templates = load_templates(run.resolve_path(cfg.prompt.template_path), spec=spec_of(cfg))
     dev = model.device
     out_dir = _prepare_out_dir(run_dir, ckpt_tag, split)
     if dev.type == "cuda":
@@ -1045,7 +1048,7 @@ def _input_hash_problems(source_meta: Mapping[str, Any], *, cfg: "Config", repo_
 
     problems = []
     source_inputs = source_meta.get("inputs")
-    for path, sha in run.input_hashes(repo_root).items():
+    for path, sha in run.input_hashes(repo_root, spec_of(cfg).name).items():
         got = source_inputs.get(path) if isinstance(source_inputs, Mapping) else None
         if got != sha:
             problems.append(f"inputs[{path}]: training run {got} != current {sha}")
@@ -1106,7 +1109,7 @@ def _cluster_hard_gate(cfg: "Config", data: LoadedData, repo_root: Path) -> tupl
     state = run.resolve_path(cfg.sasrec.state_path, repo_root)
     artifacts = load_cluster_artifacts(run.resolve_path(cfg.cluster.artifact_dir, repo_root),
                                        expected_ids=expected_ids, sasrec_sha256=run.content_sha256(state),
-                                       data_sha256=run.input_hashes(repo_root), ccfg=cfg.cluster)
+                                       data_sha256=run.input_hashes(repo_root, spec_of(cfg).name), ccfg=cfg.cluster)
     mapping = parse_expert_mapping(cfg.cluster.expert_mapping, n_clusters=artifacts.n_clusters,
                                    num_experts=cfg.lora.num_experts)
     return artifacts, ClusterHardGate(artifacts, mapping, cfg.lora.num_experts)
@@ -1192,7 +1195,7 @@ def run_eval_command(cfg: "Config", run_dir: Path, *, repo_root: Path, llm_path:
     logger.info("eval of %s: checkpoints %s, splits %s, allowed differences %s", source,
                 [(tag, list(names)) for tag, _, names in checkpoints], list(ec.splits), allowed)
     data = load_dataset(cfg, repo_root)
-    templates = load_templates(run.resolve_path(cfg.prompt.template_path, repo_root))
+    templates = load_templates(run.resolve_path(cfg.prompt.template_path, repo_root), spec=spec_of(cfg))
     bundle = load_tokenizer(tokenizer_dir, cfg.batching.tokenizer_sha256)
     artifacts, hard_gate, live = None, None, None
     if cfg.router.routing_mode == "cluster_hard":
@@ -1233,6 +1236,65 @@ def run_eval_command(cfg: "Config", run_dir: Path, *, repo_root: Path, llm_path:
     return _jsonable(summary)
 
 
+def run_zero_shot_command(cfg: "Config", run_dir: Path, *, repo_root: Path, llm_path: Optional[Path]) -> dict:
+    """``main.py zeroshot`` (stage S1 of the Steam ladder, §24.4, D46), inside the M0 run folder.
+
+    Evaluates the model exactly as ``build_model`` makes it from the seed: no training run, no checkpoint.
+    1. the config must describe the base LLM (``commands.zero_shot_problems``: one expert without a gate and
+       the text-only prompt, ``ConfigError`` otherwise); 2. data, templates, tokenizer, then the model once;
+    3. every ``lora_B`` of the wrapped layers must be exactly zero, so the LoRA delta is zero and the output
+       is the base model's (``EvalError`` otherwise); 4. ``evaluate_split`` with ``ckpt_tag`` ``init`` for each
+       split of ``eval.splits``; 5. ``eval/summary.json``. Returns the summary.
+
+    The test split is allowed here although ``eval`` restricts it to ``best_val``/``last`` (D11): nothing is
+    selected, the evaluated state is fixed before any data is read. ``eval.checkpoints`` and
+    ``eval.source_run`` are not read by this command.
+    """
+    from .batching import load_tokenizer
+    from .commands import tokenizer_dir_for, zero_shot_problems
+    from .config import ConfigError
+    from .data import load_dataset
+    from .model import build_model
+    from .moe_lora import MoELoRALinear
+    from .records import METRICS_FILE, RECORDS_FILE, REPRESENTATIONS_FILE
+
+    run_dir, repo_root = Path(run_dir), Path(repo_root)
+    problems = zero_shot_problems(cfg)
+    if problems:
+        raise ConfigError("zeroshot evaluates the untrained base model (24.4): " + "; ".join(problems))
+    tokenizer_dir = tokenizer_dir_for(cfg, llm_path)
+    if tokenizer_dir is None:
+        raise EvalError("tokenizer folder not available (llama2_7b: LLM_PATH, tiny_random: ILORA_TEST_TOKENIZER)")
+    data = load_dataset(cfg, repo_root)
+    templates = load_templates(run.resolve_path(cfg.prompt.template_path, repo_root), spec=spec_of(cfg))
+    bundle = load_tokenizer(tokenizer_dir, cfg.batching.tokenizer_sha256)
+    model = build_model(cfg, bundle, data.catalog, llm_path=llm_path, hard_gate=None)
+    wrapped = [(name, module) for name, module in model.named_modules() if isinstance(module, MoELoRALinear)]
+    nonzero = [name for name, module in wrapped if bool(torch.any(module.lora_B.weight != 0))]
+    if not wrapped or nonzero:
+        raise EvalError(f"zeroshot needs every lora_B at zero (the untrained state): {len(wrapped)} wrapped layers, "
+                        f"non-zero in {nonzero[:5]}")
+    ckpt_meta = {"source_run": None, "checkpoint_dir": None, "epoch": None, "tags": ["init"],
+                 "trainable_sha256": None}
+    logger.info("zeroshot: %d wrapped layers with lora_B = 0, splits %s, prompt %s", len(wrapped),
+                list(cfg.eval.splits), cfg.prompt.eval_prompt)
+    results = {}
+    for split in cfg.eval.splits:
+        result = evaluate_split(model, bundle, data, split, cfg, run_dir, ckpt_tag="init", ckpt_meta=ckpt_meta,
+                                templates=templates)
+        files = {name: run.content_sha256(result.out_dir / name)
+                 for name in (RECORDS_FILE, METRICS_FILE, REPRESENTATIONS_FILE, BATCH_INVARIANCE_FILE)
+                 if (result.out_dir / name).is_file()}
+        results[f"init/{split}"] = {"ckpt_tag": "init", "split": split, "tags": ["init"], "metrics": result.metrics,
+                                    "aux_protocols": result.aux, "files": files}
+    summary = {"stage": "zero_shot", "dataset": spec_of(cfg).name, "routing_mode": cfg.router.routing_mode,
+               "eval_prompt": cfg.prompt.eval_prompt, "splits": list(cfg.eval.splits),
+               "lora_wrapped_layers": len(wrapped), "lora_b_all_zero": True, "results": results,
+               "created_utc": run.utc_now().isoformat()}
+    _write_json(run_dir / "eval" / SUMMARY_FILE, summary)
+    return _jsonable(summary)
+
+
 __all__ = [
     "EvalError", "EVAL_SPLITS", "FULL_SPLIT_SIZE", "AUX_DROP_LAST_BATCH_SIZES", "WILSON_Z", "CKPT_TAG_RE",
     "FIRST_LINE_RULE", "BATCH_INVARIANCE_FILE", "SUMMARY_FILE", "EVAL_ALLOWED_SECTIONS", "EVAL_ALLOWED_KEYS",
@@ -1240,4 +1302,5 @@ __all__ = [
     "first_line", "judge", "trim_generated", "decode_generated", "compute_metrics", "aux_protocol_metrics",
     "wilson_interval", "eval_dir", "check_batch", "check_output", "generate_records", "evaluate_split",
     "compare_records", "load_eval_result", "eval_config_differences", "resolve_eval_checkpoints", "run_eval_command",
+    "run_zero_shot_command",
 ]

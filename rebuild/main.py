@@ -3,7 +3,7 @@
     python rebuild/main.py <command> --config <profile.yaml> [--set section.key=value ...]
     python rebuild/main.py train --resume <run folder>
 
-Commands: train | eval | export | cluster | smoke | check-env. This file only
+Commands: train | eval | export | cluster | smoke | check-env | zeroshot. This file only
 parses arguments, loads the profile and calls ``ilora.commands.run_command``;
 it puts ``rebuild/`` on ``sys.path`` itself so that it works from any working
 directory and under ``python -I``.
@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         + ". Run folders are created under runs/rebuild/<profile>_<UTC>/.",
     )
     parser.add_argument("command", choices=commands.COMMANDS,
-                        help="train, eval, export, cluster, smoke or check-env")
+                        help="train, eval, export, cluster, smoke, check-env or zeroshot")
     parser.add_argument("--config", type=Path, metavar="PROFILE_YAML",
                         help="profile file, e.g. rebuild/configs/paper_spec.yaml")
     parser.add_argument("--set", dest="sets", action="append", default=[], metavar="SECTION.KEY=VALUE",

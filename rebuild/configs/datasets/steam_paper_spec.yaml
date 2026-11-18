@@ -1,0 +1,15 @@
+# steam_paper_spec.yaml (E2 iLoRA on Steam, DESIGN 23.6): the keys that differ from ../paper_spec.yaml
+extends: ../paper_spec.yaml
+sasrec:
+  source_path: rec_model/steam.pt
+  source_sha256: "752c0cd11a8646adca10025b5746dfcb8968967a6104546f6f869a3ebf26609b"
+  state_path: runs/rebuild/assets/sasrec_steam/sasrec_steam_state.pt
+  state_digest: "d5d13fc0bc0f3c8ebc2f64e4247e9da3b486e6984c931bb8454ebbb17c8b3932"
+  reference_path: runs/rebuild/assets/sasrec_steam/sasrec_steam_reference.pt
+prompt:
+  template_path: prompt/game.txt
+train:
+  micro_batch_size: 4
+  grad_accum: 32
+eval:
+  batch_size: 4

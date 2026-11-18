@@ -30,7 +30,7 @@ from typing import Final, Optional, Union
 
 import numpy as np
 
-from .data import NUM_ITEMS, ItemCatalog, Sample
+from .data import ItemCatalog, Sample
 from .sections import CandidatesConfig
 from .seeding import derive_seed, np_rng
 
@@ -138,17 +138,17 @@ def candidates_for(sample: Sample, *, main_seed: int, epoch: Optional[int],
                    cfg: CandidatesConfig) -> tuple[int, ...]:
     """The 20 candidates of ``sample`` (D10, §6.6.2): ``epoch`` int for training, None for evaluation."""
     if isinstance(cfg.num_candidates, bool) or cfg.num_candidates != NUM_CANDIDATES:
-        raise CandidateError(f"candidates.num_candidates must be {NUM_CANDIDATES} (§3.1 cand_ids [B, 20], "
-                             f"template text '20 movie titles'), got {cfg.num_candidates!r}")
+        raise CandidateError(f"candidates.num_candidates must be {NUM_CANDIDATES} (§3.1 cand_ids [B, 20], D10), "
+                             f"got {cfg.num_candidates!r}")
     key = candidate_key(sample, epoch)
     if sample.target in sample.history:          # checked before the pool (M1 Sample also rejects it)
         raise CandidateError(f"{sample.sample_id} (key {key}): target {sample.target} is in the history "
                              f"{sample.history}")
     rng = np_rng(main_seed, *key)                # one Generator per sample and purpose (§4.6.4)
-    cands = draw_candidates(sample.history, sample.target, rng, num_items=NUM_ITEMS,
+    cands = draw_candidates(sample.history, sample.target, rng, num_items=sample.num_items,   # D28, §23.5
                             num_candidates=cfg.num_candidates)
     try:
-        check_candidates(cands, sample, num_items=NUM_ITEMS, num_candidates=cfg.num_candidates)
+        check_candidates(cands, sample, num_items=sample.num_items, num_candidates=cfg.num_candidates)
     except CandidateError as exc:
         raise CandidateError(f"{exc} (key {key})") from exc
     return cands

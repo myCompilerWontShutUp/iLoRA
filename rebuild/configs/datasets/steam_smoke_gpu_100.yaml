@@ -1,0 +1,10 @@
+# steam_smoke_gpu_100.yaml (M13 smoke level 2 on Steam, D14: 80 + 10 + 10 users). 1,385 train samples (DESIGN 23.6):
+#   train.warmup_divisor 10 (T = 22, 11 gives w = 2, 1; the parent value 20 gives w = 0 at train.epochs=1).
+extends: steam_paper_spec.yaml
+data:
+  subset: smoke
+train:
+  epochs: 2
+  warmup_divisor: 10
+eval:
+  batch_invariance_check: true

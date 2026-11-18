@@ -1,11 +1,13 @@
 """M4 prompt와 curriculum (DESIGN.md §8, §3.1 prompt·``BatchPlan``).
 
-Templates come from ``prompt/movie.txt`` only (``TEMPLATE_FILE``, the key of
-``run.EXPECTED_INPUTS``): ``load_templates`` compares the CRLF -> LF
-normalized sha256 with the M0 expected value before reading, then
-``parse_templates`` keeps the released reading (``splitlines()`` and
-``strip()``, ``U data/data_interface.py:182-186``) and rejects anything but
-exactly one ``[HistoryHere]`` and one ``[CansHere]`` per template (§8.6.2).
+Templates come from the file of the dataset that ``prompt.template_path`` selects
+(``DatasetSpec.template_file``, the key of the M0 input table: ``prompt/movie.txt``
+= ``TEMPLATE_FILE``, ``prompt/game.txt`` or ``prompt/artist.txt``, §8.6.8, D27,
+D37): ``load_templates`` compares the CRLF -> LF normalized sha256 with the M0
+expected value of that dataset before reading, then ``parse_templates`` keeps the
+released reading (``splitlines()`` and ``strip()``,
+``U data/data_interface.py:182-186``) and rejects anything but exactly one
+``[HistoryHere]`` and one ``[CansHere]`` per template (§8.6.2).
 
 Every random choice is keyed by ``derive_seed`` coordinates, never by
 DataLoader worker state (§4.6.4, D3, D15):
@@ -36,7 +38,8 @@ import torch
 
 from . import run, seeding
 from .candidates import CandidateError, check_candidates
-from .data import HISTORY_LEN, MIN_LEN_SEQ, NUM_ITEMS, ItemCatalog, Sample
+from .data import HISTORY_LEN, MIN_LEN_SEQ, ItemCatalog, Sample
+from .datasets import MOVIELENS, DatasetSpec
 from .sections import PromptConfig
 
 if TYPE_CHECKING:
@@ -144,34 +147,38 @@ def parse_templates(data: bytes, *, source: str) -> TemplateSet:
     return TemplateSet(templates=tuple(lines), parts=tuple(parts))
 
 
-def load_templates(path: Path) -> TemplateSet:
-    """§8.6.2 steps 0-1, then ``parse_templates``. Call as ``load_templates(repo_root / cfg.prompt.template_path)``.
+def load_templates(path: Path, *, spec: DatasetSpec = MOVIELENS) -> TemplateSet:
+    """§8.6.2 steps 0-1, then ``parse_templates``. Call as ``load_templates(repo_root /
+    cfg.prompt.template_path, spec=spec_of(cfg))`` (§23.4).
 
     A missing file is an error (not an empty list, ``U data/data_interface.py:189-190``).
-    Before reading, ``run.content_sha256(path, text=True)`` must equal
-    ``run.EXPECTED_INPUTS[TEMPLATE_FILE][0]``, so paths that skip the M0 environment
+    Before reading, ``run.content_sha256(path, text=True)`` must equal the dataset's
+    template entry ``run.expected_inputs(spec.name)[spec.template_file][0]`` (MovieLens:
+    ``run.EXPECTED_INPUTS[TEMPLATE_FILE][0]``), so paths that skip the M0 environment
     check (CPU tests, smoke) read the same content.
     """
     path = Path(path)
     if not path.is_file():
         raise PromptError(f"{path}: template file not found")
-    expected = run.EXPECTED_INPUTS[TEMPLATE_FILE][0]
+    expected = run.expected_inputs(spec.name)[spec.template_file][0]
     got = run.content_sha256(path, text=True)
     if got != expected:
+        table = "run.EXPECTED_INPUTS" if spec.name == MOVIELENS.name else f"run.expected_inputs({spec.name!r})"
         raise PromptError(f"{path}: template file sha256 (CRLF->LF) {got} != expected {expected} "
-                          f"(run.EXPECTED_INPUTS[{TEMPLATE_FILE!r}])")
+                          f"({table}[{spec.template_file!r}])")
     return parse_templates(path.read_bytes(), source=str(path))
 
 
-def check_catalog_titles(catalog: ItemCatalog) -> None:
-    """Titles must not contain ``[``, ``]``, ``<s>``, ``</s>``, ``<unk>`` (§8.6.2).
+def check_catalog_titles(catalog: ItemCatalog, forbidden: Sequence[str] = _TITLE_FORBIDDEN) -> None:
+    """Titles must not contain any string of ``forbidden`` (§8.6.2; default MovieLens ``[``, ``]``, ``<s>``,
+    ``</s>``, ``<unk>``; the other datasets pass their ``DatasetSpec.title_forbidden``, D39).
 
     Such a title would create or break a slot or a special token. The empty title
     (item 266), titles with a trailing space and non-ASCII titles stay as they are (D20).
     """
-    bad = [(i, t) for i, t in enumerate(catalog.titles) if any(s in t for s in _TITLE_FORBIDDEN)]
+    bad = [(i, t) for i, t in enumerate(catalog.titles) if any(s in t for s in forbidden)]
     if bad:
-        raise PromptError(f"{len(bad)} catalog title(s) contain one of {list(_TITLE_FORBIDDEN)}: "
+        raise PromptError(f"{len(bad)} catalog title(s) contain one of {list(forbidden)}: "
                           f"{[f'item {i}: {t!r}' for i, t in bad[:10]]}")
 
 
@@ -244,7 +251,7 @@ def build_prompt(sample: Sample, cands: tuple[int, ...], catalog: ItemCatalog, t
     """Prompt of one sample after the boundary checks of §8.6.4.
 
     ``3 <= len(history) <= 10`` (§3.1 ``Sample``) and the §3.1 candidate contract (20
-    distinct Python ints 0-1681, the target exactly once, no history item) are checked
+    distinct Python ints below ``sample.num_items``, the target exactly once, no history item) are checked
     again, so a wrong candidate tuple fails here and never reaches tokenization.
     History titles are in ``Sample.history`` order (oldest first,
     ``U data/movielens_data.py:89-91``), candidate titles in the M2 order.
@@ -253,7 +260,7 @@ def build_prompt(sample: Sample, cands: tuple[int, ...], catalog: ItemCatalog, t
     if not MIN_LEN_SEQ <= len(sample.history) <= HISTORY_LEN:
         raise PromptError(f"{where}: history length {len(sample.history)} is outside [{MIN_LEN_SEQ}, {HISTORY_LEN}]")
     try:
-        check_candidates(cands, sample, num_items=NUM_ITEMS, num_candidates=NUM_CANDIDATES)
+        check_candidates(cands, sample, num_items=sample.num_items, num_candidates=NUM_CANDIDATES)
     except CandidateError as exc:
         raise PromptError(f"{where}: candidates break the §3.1 contract: {exc}") from exc
     titles = catalog.titles

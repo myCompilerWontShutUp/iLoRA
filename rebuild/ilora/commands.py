@@ -44,10 +44,11 @@ from typing import Any, Callable, Iterator, Mapping, Optional, Sequence, Union
 
 from . import run
 from .config import ConfigError, config_hash, dump_config, load_config, parse_override
+from .datasets import spec_of
 
 PathLike = Union[str, "os.PathLike[str]"]
 
-COMMANDS = ("train", "eval", "export", "cluster", "smoke", "check-env")   # §4.6.1
+COMMANDS = ("train", "eval", "export", "cluster", "smoke", "check-env", "zeroshot")   # §4.6.1, zeroshot §24.4
 # command -> (module of the ilora package, function name)
 COMMAND_FUNCTIONS: dict[str, tuple[str, str]] = {
     "train": ("train", "train"),                      # M10 §14.6.1
@@ -55,6 +56,7 @@ COMMAND_FUNCTIONS: dict[str, tuple[str, str]] = {
     "export": ("records", "run_export"),              # M12 §16.6.1
     "cluster": ("cluster", "run_cluster"),            # M15 §19.6.1
     "smoke": ("smoke", "run_smoke"),                  # M13 §17.6.12 제안 2
+    "zeroshot": ("evaluate", "run_zero_shot_command"),   # stage S1 §24.4
 }
 RESUMABLE_STATUSES = ("failed", "running")            # §3.1: failed or unfinished runs only
 # Path-valued keys (§18.6.2, §18.6.12 제안 3), all read through run.resolve_path.
@@ -145,12 +147,31 @@ def asset_record(cfg: Any, *, repo_root: Path, llm_path: Optional[Path],
 # ----------------------------------------------------------------------------
 # Shared preparation checks
 # ----------------------------------------------------------------------------
+def zero_shot_problems(cfg: Any) -> list[str]:
+    """Why ``cfg`` cannot be a zero-shot evaluation (§24.4, D46); empty when it can.
+
+    The untrained model must be the base LLM: one expert without a gate (the LoRA delta is exactly zero while
+    every ``lora_B`` is zero) and the text-only prompt (an untrained projector would put random vectors in a
+    hybrid prompt).
+    """
+    problems = []
+    if cfg.router.routing_mode != "none":
+        problems.append(f"router.routing_mode must be none (lora.num_experts 1), got {cfg.router.routing_mode!r}")
+    if cfg.prompt.eval_prompt != "text_only":
+        problems.append(f"prompt.eval_prompt must be text_only, got {cfg.prompt.eval_prompt!r}")
+    return problems
+
+
 def command_requirements(command: str, cfg: Any) -> None:
     """Keys that one command needs (checked before a run folder is made)."""
     if command == "eval" and cfg.eval.source_run is None:
         raise ConfigError("eval needs --set eval.source_run=<training run folder> (DESIGN §15.6.12)")
     if command == "export" and cfg.records.source_run is None:
         raise ConfigError("export needs --set records.source_run=<training run folder> (DESIGN §16.6.9)")
+    if command == "zeroshot":
+        problems = zero_shot_problems(cfg)
+        if problems:
+            raise ConfigError("zeroshot evaluates the untrained base model (DESIGN §24.4): " + "; ".join(problems))
 
 
 def required_free_gib(command: str, cfg: Any) -> float:
@@ -172,7 +193,8 @@ def disk_check(run_dir: Path, command: str, cfg: Any) -> dict:
 def environment_check(cfg: Any, *, repo_root: Path, llm_path: Optional[Path]) -> None:
     """M0 environment check of §4.6.5 for this profile (GPU only for cuda:0, LLaMA only for llama2_7b)."""
     run.check_environment(require_gpu=cfg.model.device.startswith("cuda"), llm_path=llm_path,
-                          require_llm=cfg.model.backbone == "llama2_7b", check_inputs=True, repo_root=repo_root)
+                          require_llm=cfg.model.backbone == "llama2_7b", check_inputs=True, repo_root=repo_root,
+                          dataset=spec_of(cfg).name)
 
 
 def self_check() -> None:
@@ -341,7 +363,7 @@ def _dispatch(command: str, cfg: Any, run_dir: Path, *, repo_root: Path, llm_pat
     function = getattr(_module(module_name), function_name)
     if command == "train":
         return function(cfg, run_dir, repo_root=repo_root, llm_path=llm_path, resume=resume)
-    if command == "eval":
+    if command in ("eval", "zeroshot"):
         return function(cfg, run_dir, repo_root=repo_root, llm_path=llm_path)
     if command in ("export", "cluster"):
         return function(cfg, run_dir, repo_root=repo_root)
@@ -397,7 +419,7 @@ def run_command(command: str, cfg: Any, overrides: Sequence[str] = (), *, profil
             extra: dict[str, Any] = {
                 "command": command,
                 "profile_path": str(profile_path) if profile_path is not None else None,
-                "inputs": run.input_hashes(repo_root),
+                "inputs": run.input_hashes(repo_root, spec_of(cfg).name),
                 "assets": asset_record(cfg, repo_root=repo_root, llm_path=llm, tokenizer_dir=tok_dir),
                 "paths": paths,
                 "llm_path": str(llm) if llm is not None else None,
@@ -452,5 +474,5 @@ def run_command(command: str, cfg: Any, overrides: Sequence[str] = (), *, profil
 __all__ = [
     "COMMANDS", "COMMAND_FUNCTIONS", "PATH_KEYS", "CommandError", "run_command", "check_env", "check_sasrec",
     "check_tokenizer", "environment_check", "self_check", "llm_path_for", "tokenizer_dir_for",
-    "resolved_paths", "asset_record", "command_requirements", "disk_check", "load_run_config",
+    "resolved_paths", "asset_record", "command_requirements", "zero_shot_problems", "disk_check", "load_run_config",
 ]

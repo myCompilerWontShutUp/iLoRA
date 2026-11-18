@@ -36,7 +36,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from . import run
-from .data import HISTORY_LEN, PAD_ID, pad_histories
+from .data import HISTORY_LEN, pad_histories
 
 if TYPE_CHECKING:
     from .data import ItemCatalog
@@ -553,7 +553,7 @@ class SASRecEncoder(nn.Module):
                    num_threads: int = EXPORT_THREADS) -> torch.Tensor:
         """z of every history, ``[N, hidden_size]`` float32 on CPU, in input order (one split per call).
 
-        M1 ``pad_histories(histories, PAD_ID, HISTORY_LEN)`` (5.6.13), then ``forward`` on
+        M1 ``pad_histories(histories, self.item_num, HISTORY_LEN)`` (5.6.13, D28), then ``forward`` on
         consecutive slices of ``chunk`` rows. On CPU ``torch.set_num_threads(num_threads)`` holds
         during the call and the previous value comes back. With the reference file's ``chunk``
         and ``num_threads`` and one split per call, the CPU result equals the original bit for bit
@@ -562,7 +562,7 @@ class SASRecEncoder(nn.Module):
         for name, value in (("chunk", chunk), ("num_threads", num_threads)):
             if not _is_int(value) or value < 1:
                 raise ValueError(f"{name} must be an int >= 1, got {value!r}")
-        hist_ids, len_seq = pad_histories(histories, PAD_ID, HISTORY_LEN)
+        hist_ids, len_seq = pad_histories(histories, self.item_num, HISTORY_LEN)
         device = self._param_device()
         previous = torch.get_num_threads() if device.type == "cpu" else None
         parts = []
@@ -660,7 +660,7 @@ def verify_against_reference(encoder: SASRecEncoder, reference_path: Path, devic
     for split, (start, stop) in _split_blocks(ref["sample_ids"], path).items():
         hist, lens = ref["hist_ids"][start:stop], ref["len_seq"][start:stop]
         histories = [row[:n] for row, n in zip(hist.tolist(), lens.tolist())]
-        padded, padded_len = pad_histories(histories, PAD_ID, HISTORY_LEN)
+        padded, padded_len = pad_histories(histories, encoder.item_num, HISTORY_LEN)
         padding_matches = torch.equal(padded, hist) and torch.equal(padded_len, lens)
         z = encoder.encode_all(histories, chunk=ref["chunk"], num_threads=ref["num_threads"])
         z_ref = ref["z"][start:stop]

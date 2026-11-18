@@ -1,0 +1,3 @@
+# steam_s3_llara.yaml (Steam ladder stage S3, DESIGN 24.5): LLaRA = one expert, hybrid prompt with the curriculum.
+# Same settings as ../datasets/steam_llara_baseline.yaml; the file exists so that the run folder carries the stage.
+extends: ../datasets/steam_llara_baseline.yaml

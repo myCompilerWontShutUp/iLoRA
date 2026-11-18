@@ -1,7 +1,7 @@
 # iLoRA 재구현 설계 문서
 
-상태: **구현 완료, 로컬 시험 통과, VESSL 실행 전** (결정 D1–D26 확정, 모듈 M0–M15 상세 작성·반박 검토·모듈 간 일관성 점검 완료, 코드 구현과 로컬 시험 완료: skip은 `VESSL_REQUIRED`(17.6.10)뿐, 구현 반박 검토 반영)
-작성 시작: 2026-11-02 · 최근 갱신: 2026-11-06
+상태: **구현 완료, 로컬 시험 통과, VESSL 실행 전** (결정 D1–D26 확정, 모듈 M0–M15 상세 작성·반박 검토·모듈 간 일관성 점검 완료, 코드 구현과 로컬 시험 완료: skip은 `VESSL_REQUIRED`(17.6.10)뿐, 구현 반박 검토 반영). 다중 데이터셋 확장(Steam, LastFM)은 23장: 구현 완료, 로컬 CPU 확인 2026-11-09 (결정 D27–D44, 21장 2026-11-09 구현 행), VESSL 실행 전. 2026-11-16부터 실험은 Steam에서 단계별로 진행한다 (24장, 결정 D45–D47): S0 측정 완료, S1 구현과 로컬 시험 완료
+작성 시작: 2026-11-02 · 최근 갱신: 2026-11-16
 
 이 문서는 iLoRA(NeurIPS 2024)를 논문의 방법론과 공개 코드의 구조를 참고해 처음부터 다시 구현하기 위한 설계서다. 모든 모듈의 설계가 끝난 뒤 제작을 시작하고, 제작도 모듈 단위로 테스트를 통과시키며 진행한다.
 
@@ -33,7 +33,7 @@
 - 2024-08 코드: `U@0a69c15 <경로>`, 2024-08 collater: blob `b69479a07433489ac583b79c40930500be802960`
 - LLaRA 코드: `L <경로>:<라인>` = ljy0ustc/LLaRA `9733f732399e95e236f4f2e1d1139c1f0437090e`
 - 우리 fork: `F <경로>` = myCompilerWontShutUp/iLoRA `exp/gate-cluster` (baseline `6c7ebac`, 현재 `8a22b13`)
-- 재구현 코드: `R <rebuild 아래 경로> <함수·클래스>` = 이 저장소 `rebuild/` (2026-11-06 구현). 모듈 전체에 걸친 사실은 이름 없이 경로만(`R ilora/cluster.py`), `RUNBOOK.md`는 절 이름(`R RUNBOOK.md R7`)
+- 재구현 코드: `R <rebuild 아래 경로> <함수·클래스>` = 이 저장소 `rebuild/` (2026-11-06 구현, 23장 확장 2026-11-09 구현). 모듈 전체에 걸친 사실은 이름 없이 경로만(`R ilora/cluster.py`), `RUNBOOK.md`는 절 이름(`R RUNBOOK.md R7`)
 - iLoRA 논문 페이지: NeurIPS 2024 proceedings PDF 기준. `[v1 …]`은 arXiv 2408.10159v1 PDF 기준
 - LLaRA 논문: `[LLaRA §절 p.쪽 식/표]` = arXiv 2312.02445 v4 PDF
 - 라이브러리 소스 (설치된 wheel 기준, 패키지 폴더 아래 상대 경로)
@@ -41,7 +41,7 @@
   - torch 2.0.0: `torch2.0 <경로>:<라인>` (예: `torch2.0 cuda/amp/grad_scaler.py`)
   - pytorch_lightning 1.8.6: `PL1.8.6 <경로>:<라인>` (예: `PL1.8.6 loops/optimization/optimizer_loop.py:88`). 공개 코드가 고정한 판(`U requirements.txt:149`)의 wheel `pytorch_lightning-1.8.6-py3-none-any.whl`(sha256 `8b6b4126…866d`)을 풀어 읽음. 재구현은 Lightning을 쓰지 않음 (D13)
   - scikit-learn 1.2.2: `sklearn 1.2.2 <경로>:<라인>` (예: `sklearn 1.2.2 cluster/_kmeans.py:1483-1490`)
-- 측정 스크립트: `계산:`·`측정:` 뒤의 `design/tmp/…`, `impl/…`, `review/…`, `design_sync/…` 경로는 설계·구현 중 작업 공간에서 돌린 측정 스크립트이고 저장소에 넣지 않음. 결과 값과 조건은 본문에 적음 (저장소만으로는 그대로 다시 돌릴 수 없음)
+- 측정 스크립트: `계산:`·`측정:` 뒤의 `design/tmp/…`, `impl/…`, `review/…`, `design_sync/…`, `multi/…` 경로는 설계·구현 중 작업 공간에서 돌린 측정 스크립트이고 저장소에 넣지 않음. 결과 값과 조건은 본문에 적음 (저장소만으로는 그대로 다시 돌릴 수 없음)
 
 ### 0.3 모듈 작성 틀
 각 모듈은 아래 항목을 같은 순서로 채운다.
@@ -67,9 +67,9 @@
 - 같은 구현의 K = 1(LoRA, LLaRA와 같음)을 기준선으로 돌려 같은 조건에서 비교한다 (E1).
 - 공개 코드에서 확인된 결함(저장 필터, 평가 N, curriculum 카운터, padding, router BatchNorm 등)이 없는 구현을 만든다.
 - 이후 연구(gate 분석, SASRec 군집 기반 cluster-hard routing, E4)의 기반으로 쓴다.
+- Steam·LastFM 확장은 23장에서 다룬다 (2026-11-09 설계·구현, 로컬 CPU 확인 통과, VESSL 실행 전, 결정 D27–D44). `[SPEC §0.5]`의 MovieLens 한정은 SPEC 소유자의 개정 대상이다 (23.1, 23.10 O1).
 
 ### 1.2 범위 밖
-- LastFM, Steam 데이터셋 `[SPEC §0.5]`
 - 공개 코드의 결함 동작을 그대로 재현하는 것. 그 기준은 기존 fork baseline(`F` 6c7ebac, 결과 보관 파일)이 맡는다 (D26)
 
 ### 1.3 원칙
@@ -97,13 +97,15 @@
 | 우리 baseline | fork `6c7ebac`, 결과 보관 파일 sha256 `ede386ce…0398` | test 95/86/30, VR 0.9053, HR 0.3488 (정답/유효) |
 | 감사·평가 도구 | fork `8a22b13` | `scripts/eval_prompt_semantics.py` 등 |
 
+Steam·LastFM의 기준 값(`[LLaRA Table 1 p.7]`, `[LLaRA Table 2 p.8]`, `[논문 p.7 Table 1]`)과 입력 파일(데이터, 템플릿, SASRec checkpoint)의 해시는 23.2에 있다 (`R ilora/run.py EXPECTED_INPUTS_STEAM`, `R ilora/run.py EXPECTED_INPUTS_LASTFM`).
+
 ---
 
 ## 3. 모듈 목록과 의존 관계
 
 | 번호 | 모듈 | 파일 | 의존 | 상태 |
 |---|---|---|---|---|
-| M0 | 설정과 실행 관리 | `config.py`, `sections.py`, `run.py`, `seeding.py`, `precision.py`, `commands.py` | - | 테스트 통과(로컬) |
+| M0 | 설정과 실행 관리 | `config.py`, `sections.py`, `run.py`, `seeding.py`, `precision.py`, `commands.py`, `datasets.py`(23장) | - | 테스트 통과(로컬) |
 | M1 | 데이터 | `data.py` | M0 | 테스트 통과(로컬) |
 | M2 | 후보 생성 | `candidates.py` | M1 | 테스트 통과(로컬) |
 | M3 | SASRec 인코더 | `sasrec.py`, `tools/convert_sasrec.py` | M1 | 테스트 통과(로컬) |
@@ -117,10 +119,10 @@
 | M11 | 생성과 평가 | `evaluate.py` | M9, M2 | 테스트 통과(로컬) |
 | M12 | 기록과 gate 분석 | `records.py`, `analysis.py` | M10, M11 | 테스트 통과(로컬) |
 | M13 | 테스트 | `tests/`, `pytest.ini`, `smoke.py` | 전 모듈 | 테스트 통과(로컬) |
-| M14 | 실험 구성 | `configs/`, `RUNBOOK.md`, `tools/compare_runs.py` | 전 모듈 | 테스트 통과(로컬) |
+| M14 | 실험 구성 | `configs/`, `RUNBOOK.md`, `RUNBOOK_datasets.md`(23장), `tools/compare_runs.py` | 전 모듈 | 테스트 통과(로컬) |
 | M15 | SASRec 군집과 cluster-hard 배정 | `cluster.py` | M3, M7, M12 | 테스트 통과(로컬) |
 
-- 테스트 통과(로컬) = Windows CPU 전체 시험 통과 (2026-11-06, 745 passed, 37 skipped in 1039.78s (0:17:19)). `VESSL_REQUIRED` 기준은 RUNBOOK 실행 후 확인한다.
+- 테스트 통과(로컬) = Windows CPU 전체 시험 통과 (2026-11-06, 745 passed, 37 skipped in 1039.78s (0:17:19); 23장 확장의 로컬 시험은 21장 2026-11-09 구현 행). `VESSL_REQUIRED` 기준은 RUNBOOK 실행 후 확인한다.
 - `의존`은 그 모듈이 정의를 가져다 쓰는 주된 모듈이다(전부가 아님). 명령 함수는 실행할 때 더 넓게 부르고, 그때 생기는 순환은 함수 안 import로 끊는다 `[결정]`: M10 `train`은 M11 `evaluate_split`·`eval_dir`·`load_eval_result`와 M12 `TrainRecorder`·`ActivationMaxMonitor`를, M11 `evaluate_split`은 M12 `write_eval`·`save_npz`를, M11 `run_eval_command`는 M10 `load_model_state`를, M12 `run_export`는 M10 `read_trainable_state`와 M11 `EvalRecord`(`read_eval_records`)를 부르고, cluster_hard 경로(M10·M11·M12)는 M15를 부른다. M15는 M12의 NPZ 형식과 z 계산(`compute_representations`, 16.6.1)을 모듈 수준에서 씀. 이유: checkpoint 읽기(14.6.6)·평가(15장)·기록 형식(16장)을 한 곳에서만 정의함. 모듈 수준 import에는 순환이 없음 (15.6.1) `R ilora/evaluate.py run_eval_command`, `R ilora/records.py run_export`, `R ilora/cluster.py`
 
 ### 3.1 모듈 간 계약
@@ -128,23 +130,23 @@
 
 | 이름 | 정의 | 만드는 곳 | 쓰는 곳 |
 |---|---|---|---|
-| `Config` | 구역별 frozen dataclass (`run, data, candidates, sasrec, prompt, batching, projector, router, lora, model, train, eval, records, cluster`), 키 87개(`projector`는 키 없음). 스키마 `ilora/sections.py`, 전체 키 표 18.6.2. 프로파일 YAML(`extends` 상속, 4.6.2) + `--set` 덮어쓰기. 읽기는 `config.load_config(path, overrides=()) -> (cfg, applied)`로만 (`applied` = 적용한 덮어쓰기 dict. 실행 폴더의 `config.yaml`도 같은 함수로 읽음), 설정 오류는 `ConfigError`(ValueError), 설정 해시는 `config.config_hash(cfg)`(4.6.3). 구역 간 검사 `Config.validate`: `router.routing_mode == cluster_hard` ⇔ `cluster.artifact_dir` 있음, `routing_mode == none` ⇔ `lora.num_experts == 1`, `model.torch_dtype` ↔ `train.precision` (float16 ↔ fp16_amp, bfloat16 ↔ bf16_amp, float32 ↔ fp32), `model.backbone == tiny_random` ⇔ (`device == cpu`, `torch_dtype == float32`). 구역 검사: `data.train_rows`가 비어 있지 않으면 `data.subset == smoke` | M0 | 전부 |
+| `Config` | 구역별 frozen dataclass (`run, data, candidates, sasrec, prompt, batching, projector, router, lora, model, train, eval, records, cluster`), 키 87개(`projector`는 키 없음). 스키마 `ilora/sections.py`, 전체 키 표 18.6.2. 프로파일 YAML(`extends` 상속, 4.6.2) + `--set` 덮어쓰기. 읽기는 `config.load_config(path, overrides=()) -> (cfg, applied)`로만 (`applied` = 적용한 덮어쓰기 dict. 실행 폴더의 `config.yaml`도 같은 함수로 읽음), 설정 오류는 `ConfigError`(ValueError), 설정 해시는 `config.config_hash(cfg)`(4.6.3). 구역 간 검사 `Config.validate`: `router.routing_mode == cluster_hard` ⇔ `cluster.artifact_dir` 있음, `routing_mode == none` ⇔ `lora.num_experts == 1`, `model.torch_dtype` ↔ `train.precision` (float16 ↔ fp16_amp, bfloat16 ↔ bf16_amp, float32 ↔ fp32), `model.backbone == tiny_random` ⇔ (`device == cpu`, `torch_dtype == float32`). 구역 검사: `data.train_rows`가 비어 있지 않으면 `data.subset == smoke`. 구역 간 검사에는 `prompt.template_path`–`sasrec.source_sha256`, `prompt.template_path`–`data.title_mode` 짝도 있다 (D27, 23.4) `R ilora/sections.py Config.validate` | M0 | 전부 |
 | `derive_seed(main_seed, *keys) -> int` | `"{main_seed}\|{key1}\|{key2}\|..."`의 SHA-256 앞 8 byte를 63 bit 정수로. key는 str 또는 int. 모든 난수원은 이 함수로만 만든다 (key 목록 4.6.4, 예외는 KMeans `random_state` 하나) | M0 | 전부 |
-| 경로와 해시 | 경로 값 키는 절대 경로 또는 저장소 루트 기준 상대 경로이고 `run.resolve_path(value, repo_root)` 하나로만 해석. `run.content_sha256(path, text=False)` (text면 CRLF→LF 정규화), `run.EXPECTED_INPUTS: dict[경로, (sha256, is_text)]`, 그 파일들의 현재 값 `run.input_hashes(repo_root) -> dict[경로, sha256 또는 None]` (`meta.json` `inputs`, M15 `data_sha256`), 설정·환경이 위치를 정하는 파일의 값 `commands.asset_record(cfg, *, repo_root, llm_path, tokenizer_dir)` (`meta.json` `assets`, M10 checkpoint·M11 eval 명령이 대조). `meta.json`은 `run.read_meta(run_dir)`로 읽고 `run.update_meta(run_dir, fields)`로만 블록을 더함 (4.6.3) | M0 | M1, M3 도구, M4, M5, M10–M15 |
+| 경로와 해시 | 경로 값 키는 절대 경로 또는 저장소 루트 기준 상대 경로이고 `run.resolve_path(value, repo_root)` 하나로만 해석. `run.content_sha256(path, text=False)` (text면 CRLF→LF 정규화), `run.EXPECTED_INPUTS: dict[경로, (sha256, is_text)]`, 그 파일들의 현재 값 `run.input_hashes(repo_root) -> dict[경로, sha256 또는 None]` (`meta.json` `inputs`, M15 `data_sha256`), 설정·환경이 위치를 정하는 파일의 값 `commands.asset_record(cfg, *, repo_root, llm_path, tokenizer_dir)` (`meta.json` `assets`, M10 checkpoint·M11 eval 명령이 대조). `meta.json`은 `run.read_meta(run_dir)`로 읽고 `run.update_meta(run_dir, fields)`로만 블록을 더함 (4.6.3). `run.expected_inputs(dataset)`·`input_hashes(repo_root, dataset)`가 데이터셋별 표를 쓰고 `EXPECTED_INPUTS`는 MovieLens 표 그대로다 (23.4) `R ilora/run.py expected_inputs` | M0 | M1, M3 도구, M4, M5, M10–M15 |
 | precision 도구 | `precision.autocast_for(precision, device)`: `fp16_amp` → CUDA float16 autocast, `bf16_amp` → bfloat16, `fp32` → 아무것도 안 함. `precision.make_grad_scaler(tc, device)`: `fp16_amp`일 때만 켜고 값은 `train.scaler_*` | M0 | M10, M11 |
 | 명령 분기 | `commands.run_command(command, cfg, overrides=(), *, profile, root, repo_root, argv, llm_path, tokenizer_dir, profile_path, resume, stamp) -> Path`: `train`, `eval`, `export`, `cluster`, `check-env`, `smoke`. `overrides`는 `--set` 원문 목록(`meta.json`에는 해석한 값), `profile`은 폴더 이름 접두어, `root`는 `runs/rebuild` 또는 smoke 단계의 `<smoke 실행>/steps`. `repo_root`부터는 기본값이 있는 keyword `[결정]`(smoke와 재개에 필요): `llm_path` 기본 `LLM_PATH`(llama2_7b만), `tokenizer_dir` 기본 LLaMA 폴더(llama2_7b) 또는 `ILORA_TEST_TOKENIZER`(tiny_random) (`commands.llm_path_for`·`tokenizer_dir_for`, M10·M11·M13도 같은 규칙), `profile_path`는 smoke에 필수, `resume`은 train만 `R ilora/commands.py run_command`. 공통 준비(실행 폴더와 `run.lock`, `config.yaml`, `meta.json`, `run.log`, 디스크·환경 점검, `candidates.self_check()`, `tracked_run`) 뒤 명령 함수 호출: M10 `train(cfg, run_dir, *, repo_root, llm_path, resume)`, M11 `run_eval_command(cfg, run_dir, *, repo_root, llm_path)`, M12 `run_export(cfg, run_dir, *, repo_root)`, M15 `run_cluster(cfg, run_dir, *, repo_root)`, M13 `run_smoke(profile_path, overrides, run_dir, *, repo_root, llm_path, tokenizer_dir)`(보고서 `passed`가 거짓이면 `CommandError`), M0 `check_env`. eval·export는 `eval.source_run`·`records.source_run`이 없으면 실행 폴더를 만들기 전에 `ConfigError`. `train --resume`은 failed·미완료(running) 학습 실행만 다시 열고(`commands.load_run_config(run_dir) -> (cfg, profile)`, 설정 해시가 `config.yaml`·`meta.json`과 같아야 함) `meta.json`의 `resumes`에 추가. 다른 살아 있는 프로세스가 `run.lock`을 쥔 폴더는 아무것도 바꾸지 않고 `CommandError` (4.6.3) | M0 | M10–M15 |
-| `ItemCatalog` | frozen `ItemCatalog(titles, title_mode, num_items, pad_id)` (5.6.1 순서, 네 필드 모두 필수이고 기본값 없음): `titles: tuple[str, ...]` (길이 1,682, index = item id 0–1681, 정규화 제목), `title_mode: str` (`code`/`fixed`, D20), `num_items = 1682`, `pad_id = 1682` | M1 | M2, M4, M11, M12 |
-| `Sample` | frozen. `split: str` (`train`/`val`/`test`), `row: int` (배포 `.df` 파일의 원래 행 번호, 필터 전), `sample_id`(속성) = `f"{split}:{row}"`, `user_id: int` (pseudo, D14), `history: tuple[int, ...]` (padding 없음, 오래된 것부터, 길이 3–10), `target: int` | M1 | M2–M12, M15 |
+| `ItemCatalog` | frozen `ItemCatalog(titles, title_mode, num_items, pad_id)` (5.6.1 순서, 네 필드 모두 필수이고 기본값 없음): `titles: tuple[str, ...]` (길이 1,682, index = item id 0–1681, 정규화 제목), `title_mode: str` (`code`/`fixed`, D20), `num_items = 1682`, `pad_id = 1682` (MovieLens. Steam·LastFM은 길이·값이 3,581·4,606, 23.4) `R ilora/data.py ItemCatalog` | M1 | M2, M4, M11, M12 |
+| `Sample` | frozen. `split: str` (`train`/`val`/`test`), `row: int` (배포 `.df` 파일의 원래 행 번호, 필터 전), `sample_id`(속성) = `f"{split}:{row}"`, `user_id: int` (pseudo, D14), `history: tuple[int, ...]` (padding 없음, 오래된 것부터, 길이 3–10), `target: int`, `num_items: int`(그 표본 데이터셋의 아이템 수, 기본 1682, compare·repr 제외, D28) `R ilora/data.py Sample` | M1 | M2–M12, M15 |
 | `LoadedData` | frozen `LoadedData(catalog, train, val, test, subset, smoke_users)`, `samples(split)`, `title_mode`. `load_dataset(cfg, repo_root)`가 표본을 얻는 유일한 경로 (unpickle 전 해시 확인). smoke는 `select_smoke(data, main_seed, sizes, *, train_rows)`: `train_rows`가 비어 있지 않으면 train을 그 행들의 표본으로 고정하고 `("smoke_users", "train")`을 추첨하지 않음 | M1 | M4, M5, M10–M13, M15 |
-| `pad_histories` | `data.pad_histories(histories, pad_id, length) -> (hist_ids [N, length] int64, len_seq [N] int64)`. CPU, 오른쪽 padding 1682 | M1 | M3, M5, M12 |
-| 후보 | `tuple[int, ...]` 길이 20: 정답 정확히 1개, 중복 없음, `history`와 겹치지 않음, 순서 섞임. `candidates_for(sample, *, main_seed, epoch, cfg)` (`cfg` = `Config.candidates`, epoch: 학습 int, 평가 None). `CandidateFn` = `functools.partial(candidates_for, main_seed=…, cfg=…)` (spawn worker로 pickle 가능). `candidate_flags(cands, target, catalog)` (`FLAG_NAMES` 5개), `match_norm(title)` (판정 정규화의 유일한 정의), `self_check()` (golden 대조) | M2 | M4, M5, M11, M12 |
-| prompt | `str`. hybrid면 이력마다 `"제목 [HistoryEmb]"`, 후보마다 `"제목 [CansEmb]"`, text-only면 둘 다 `"제목 [PH]"`. 템플릿 index와 함께 넘김. API: `load_templates(path)` (해시 확인, `prompt/movie.txt`만 허용), `TemplateSet`, `choose_template(cfg, seed, n, sample, epoch)`, `build_prompt(sample, cands, catalog, templates, template_id, hybrid)`, `eval_is_hybrid(cfg)`, `curriculum_hybrid(mode, seed, tau, total)` | M4 | M5, M11 |
+| `pad_histories` | `data.pad_histories(histories, pad_id, length) -> (hist_ids [N, length] int64, len_seq [N] int64)`. CPU, 오른쪽 padding id는 데이터셋의 아이템 수 (MovieLens 1682; 호출자가 `Sample.num_items` 또는 `item_num`을 넘김, D28) `R ilora/data.py pad_histories` | M1 | M3, M5, M12 |
+| 후보 | `tuple[int, ...]` 길이 20: 정답 정확히 1개, 중복 없음, `history`와 겹치지 않음, 순서 섞임. `candidates_for(sample, *, main_seed, epoch, cfg)` (`cfg` = `Config.candidates`, epoch: 학습 int, 평가 None). `CandidateFn` = `functools.partial(candidates_for, main_seed=…, cfg=…)` (spawn worker로 pickle 가능). `candidate_flags(cands, target, catalog)` (`FLAG_NAMES` 5개), `match_norm(title)` (판정 정규화의 유일한 정의), `self_check()` (golden 대조). `candidates_for`는 `sample.num_items`로 풀을 만든다 (D28) `R ilora/candidates.py candidates_for` | M2 | M4, M5, M11, M12 |
+| prompt | `str`. hybrid면 이력마다 `"제목 [HistoryEmb]"`, 후보마다 `"제목 [CansEmb]"`, text-only면 둘 다 `"제목 [PH]"`. 템플릿 index와 함께 넘김. API: `load_templates(path, *, spec=MOVIELENS)` (해시 확인, `prompt.template_path`가 고른 데이터셋의 템플릿 파일만 허용), `TemplateSet`, `choose_template(cfg, seed, n, sample, epoch)`, `build_prompt(sample, cands, catalog, templates, template_id, hybrid)`, `eval_is_hybrid(cfg)`, `curriculum_hybrid(mode, seed, tau, total)`. `check_catalog_titles(catalog, forbidden=…)`의 기본은 MovieLens 규칙이고 Steam·LastFM은 `spec.title_forbidden`을 넘긴다 (D39, 23.5) `R ilora/prompts.py load_templates`, `R ilora/prompts.py check_catalog_titles` | M4 | M5, M11 |
 | `BatchPlan` | frozen `BatchPlan(epoch, batches_per_epoch, total, curriculum, entries: tuple[PlanEntry(tau, sample_indices, hybrid), ...])`, `digest()`, `hybrid_count()`. epoch은 0부터, `tau = epoch × NB + b + 1` (1부터), `T = epochs × NB`. `sample_indices`는 `LoadedData.train`(행 오름차순) 안의 위치. main process에서 `make_batch_plan`/`build_batch_plan`으로 만들고 worker는 계획대로 tokenization만 함 | M4 | M5, M10, M12, M13 |
 | `TokenIds`, `TokenizerBundle` | `TokenIds(bos 1, eos 2, unk 0, newline 13, pad 32000, ph 32001, history_emb 32002, cans_emb 32003, item_emb 32004, base_vocab 32000, vocab_size 32005, new_token_ids)`. `TokenizerBundle(tokenizer, ids, model_sha256)`. `load_tokenizer(dir, expected_sha256)`가 transformers 4.28.0과 sentencepiece 0.1.97을 확인. 토큰 id는 이것으로만 씀 | M5 | M9, M10, M11, M13 |
-| `TrainBatch` | `input_ids [B, L] int64`, `attention_mask [B, L] int64`, `labels [B, L] int64` (응답 토큰 외 -100), 오른쪽 padding. `hist_ids [B, 10] int64` (오른쪽 padding 1682), `len_seq [B] int64`, `cand_ids [B, 20] int64`, `hybrid: bool` (batch 전체 공통), `tau: int`, `sample_ids: list[str]`, `template_ids: list[int]`. `pin_memory()`, `to(device)`. 변형 `label_mode = released_pair`에서만 labels에 두 번째 `[BOS]`도 포함 | M5 | M9, M10 |
-| `EvalBatch` | `input_ids`, `attention_mask` (왼쪽 padding), `hist_ids`, `len_seq`, `cand_ids`, `target_ids [B]`, `cand_titles: list[list[str]]`, `target_titles: list[str]`, `hybrid: bool`, `sample_ids`, `template_ids`. `pin_memory()`, `to(device)` | M5 | M9, M11 |
+| `TrainBatch` | `input_ids [B, L] int64`, `attention_mask [B, L] int64`, `labels [B, L] int64` (응답 토큰 외 -100), 오른쪽 padding. `hist_ids [B, 10] int64` (오른쪽 padding 1682), `len_seq [B] int64`, `cand_ids [B, 20] int64`, `hybrid: bool` (batch 전체 공통), `tau: int`, `sample_ids: list[str]`, `template_ids: list[int]`. `pin_memory()`, `to(device)`. 변형 `label_mode = released_pair`에서만 labels에 두 번째 `[BOS]`도 포함. `hist_ids`의 padding id는 데이터셋의 `num_items`(MovieLens 1682, D28) `R ilora/batching.py _batch_common` | M5 | M9, M10 |
+| `EvalBatch` | `input_ids`, `attention_mask` (왼쪽 padding), `hist_ids`, `len_seq`, `cand_ids`, `target_ids [B]`, `cand_titles: list[list[str]]`, `target_titles: list[str]`, `hybrid: bool`, `sample_ids`, `template_ids`. `pin_memory()`, `to(device)`. `hist_ids` padding은 `TrainBatch`와 같음 (데이터셋별, 23.5 M5) | M5 | M9, M11 |
 | loader | `make_train_loader(plan, data, cfg, epoch, *, bundle, templates) -> Iterator[TrainBatch]`, `make_eval_loader(data, split, cfg, *, bundle, templates)`, 공개 `collate_train`/`collate_eval`. DataLoader는 `batch_size=None` | M5 | M10, M11, M13 |
-| `z` | 표본 표현 `[B, 64] float32`. SASRec eval 모드, `no_grad`, autocast 밖, CUDA에서는 TF32 끔(`strict_fp32`), 정답 미포함. `SASRecEncoder(hist_ids, len_seq)`, `embed_items(ids)` (0–1681, padding 1682 거부), `encode_all` | M3 | M7, M9, M12, M15 |
+| `z` | 표본 표현 `[B, 64] float32`. SASRec eval 모드, `no_grad`, autocast 밖, CUDA에서는 TF32 끔(`strict_fp32`), 정답 미포함. `SASRecEncoder(hist_ids, len_seq)`, `embed_items(ids)` (0..`item_num`−1만 받고 padding id `item_num` 거부; MovieLens 0–1681·1682) `R ilora/sasrec.py SASRecEncoder.embed_items`, `encode_all` | M3 | M7, M9, M12, M15 |
 | 아이템 표현 | `[..., 64] float32` (SASRec 아이템 임베딩 조회) | M3 | M6 |
 | 행동 토큰 | `[n, 4096]`. `build_projector(in_dim, out_dim, main_seed)`, autocast 아래 계산 | M6 | M9 |
 | `ω` (gate) | `[B, K] float32`, 행 합 1 (허용오차 1e-5), NaN/Inf 없음. `Router(rcfg, *, num_experts, z_dim, main_seed, hard_gate)`가 세 방식의 유일한 공급원이고 `forward(z, sample_ids) -> ω`. dynamic은 `Softmax(W_g z)`, cluster_hard는 one-hot (`HardGate`), none(K = 1)은 모두 1. 기록은 `start_recording`/`stop_recording` → `GateRecord` | M7, M15 | M8, M9, M12 |
@@ -247,7 +249,7 @@ rebuild/
   RUNBOOK.md         M14: VESSL 실행 순서와 정확한 명령
   main.py            진입점: python rebuild/main.py <명령> --config <파일> [--set 키=값 ...]
                      재개: python rebuild/main.py train --resume <실행 폴더> (--config·--set 없음)
-                     명령: train | eval | export | cluster | smoke | check-env
+                     명령: train | eval | export | cluster | smoke | check-env | zeroshot (zeroshot은 24.4)
                      (스스로 경로를 잡아 실행 위치와 무관)
                      종료 코드: 0 완료, 2 인자·설정 오류 ("config error: ..."), 1 그 밖의 예외
   ilora/             파이썬 패키지, 파일과 모듈 번호가 대응
@@ -301,6 +303,7 @@ rebuild/
   | `seed` | int | 1234 | `[SPEC §0.6]` D2, 값 계보 `[코드]` `U main.py:84`, `L main.py:84` | 모든 `derive_seed`의 main seed (단일 실행) |
 
 - **경로 값:** 경로 키는 절대 경로 또는 저장소 루트 기준 상대 경로(작업 폴더 기준이 아님). `run.resolve_path` 하나로 해석. 경로 키 8개(`sasrec.source_path`, `sasrec.state_path`, `sasrec.reference_path`, `prompt.template_path`, `eval.source_run`, `records.source_run`, `cluster.artifact_dir`, `cluster.dynamic_export_dir`)를 푼 값은 `meta.json` `paths`에 남김 `R ilora/commands.py resolved_paths`
+- **데이터셋 (23장):** 데이터셋은 기존 키 `prompt.template_path`로 고른다. 선택지는 `prompt/movie.txt`, `prompt/game.txt`, `prompt/artist.txt` 셋이고 설정 키 수 87은 그대로다 (D27, 23.4) `R ilora/datasets.py for_template`, `R ilora/sections.py PromptConfig`
 
 #### 4.6.3 실행 폴더와 출처 기록
 - **위치:** `runs/rebuild/`. 저장소 `.gitignore`의 `runs/`에 이미 포함되어 commit되지 않음
@@ -340,7 +343,7 @@ rebuild/
   - 점검 항목은 명령이 아니라 프로파일로 정함 `[결정]`: export·cluster처럼 GPU를 쓰지 않는 명령도 `cuda:0`·`llama2_7b` 프로파일이면 GPU와 `LLM_PATH`를 요구함. 이유: 위 항목이 프로파일 단위로 정의되어 있고 VESSL 단계(18.6.6 R10·R11)는 모두 같은 A100 기계에서 돌림. 로컬 시험 M15-11은 `smoke_cpu` + `data.subset=full`로 군집 명령을 돌림 `R ilora/commands.py environment_check`
   - 여유 메모리는 보지 않음 `[결정]`: 기준값을 A100에서 먼저 재야 하고(`smoke_gpu_100`은 한 프로세스에서 단계마다 점검을 되풀이), 같은 실행 폴더의 두 번째 프로세스는 `run.lock`(4.6.3)이 막고, GPU 작업을 한 번에 하나만 돌리는 규칙은 RUNBOOK이 지킴. 단계 사이 여유 메모리 측정은 VESSL 후속 (TBD)
 - LLaMA (`llama2_7b` 프로파일만): 경로(`LLM_PATH`가 없으면 실패), shard 파일(`pytorch_model*.bin` 또는 `model*.safetensors`), `tokenizer.model`, `config.json`의 `torch_dtype`이 float16 (D9). 공개 mirror NousResearch/Llama-2-7b-hf의 config.json은 `"torch_dtype": "float16"`. VESSL 파일 자체는 `VESSL_REQUIRED`
-- 입력 파일 해시가 기대값과 같음 (데이터, SASRec 가중치). `train_data.df`는 iLoRA판(blob `73b47263`, `cluster` 열 추가)과 LLaRA판(sha256 `a73b119d…`)이 다르므로 기준 파일을 명시하고 `(seq, len_seq, next)` 내용 일치를 따로 확인
+- 입력 파일 해시가 기대값과 같음 (데이터, SASRec 가중치; `run.expected_inputs(dataset)`의 데이터셋별 표를 쓰고 `EXPECTED_INPUTS`는 MovieLens 표 그대로, 23.4) `R ilora/run.py check_environment`. `train_data.df`는 iLoRA판(blob `73b47263`, `cluster` 열 추가)과 LLaRA판(sha256 `a73b119d…`)이 다르므로 기준 파일을 명시하고 `(seq, len_seq, next)` 내용 일치를 따로 확인
 - **텍스트 입력은 CRLF→LF 정규화 후 해시** `[결정]`: 로컬 Windows 저장소가 `core.autocrlf=true`라 `u.item`, `movie.txt`의 작업 트리 바이트가 Linux(VESSL)와 다름. 정규화한 값은 git blob 해시와 같음(확인함). 텍스트 파일은 항상 텍스트 모드(universal newline)로 읽어 두 환경의 파싱 결과를 같게 함
 - 기대 해시 (sha256, 텍스트는 LF 기준)
 
@@ -442,6 +445,8 @@ rebuild/
 ### 5.6 설계
 
 #### 5.6.1 공개 API (`rebuild/ilora/data.py`)
+아래 상수는 MovieLens 값(`ilora/datasets.py` `MOVIELENS`의 별칭)이고, `read_raw_titles`·`build_catalog`·`frame_fingerprint`·`parse_rows`·`assign_users`·`to_samples`·`_verified_paths`·`select_smoke`가 keyword 인자 `spec`(기본 `MOVIELENS`)을 받아 id2name 제목과 int 행 형식을 더한다 (D38, D40, 23.4) `R ilora/data.py load_dataset`.
+
 ```python
 NUM_ITEMS: Final = 1682;  PAD_ID: Final = 1682;  PAD_RATING: Final = 0
 HISTORY_LEN: Final = 10;  MIN_LEN_SEQ: Final = 3
@@ -461,13 +466,14 @@ class DataError(RuntimeError): ...
 class ItemCatalog:                       # 3.1
     titles: tuple[str, ...]
     title_mode: str                      # "code" | "fixed" (계약 추가 제안)
-    num_items: int                       # 항상 1682
-    pad_id: int                          # 항상 1682
+    num_items: int                       # 데이터셋의 아이템 수 (MovieLens 1682, 23.4)
+    pad_id: int                          # 항상 num_items
 
 @dataclass(frozen=True)
 class Sample:                            # 3.1
     split: str; row: int; user_id: int
     history: tuple[int, ...]; target: int
+    num_items: int = 1682                # 표본 데이터셋의 아이템 수, compare·repr 제외 (D28, 23.4)
     @property
     def sample_id(self) -> str: return f"{self.split}:{self.row}"
 
@@ -747,8 +753,8 @@ def self_check() -> None                            # golden 비교 (6.6.5)
    - `"val"`·`"test"`: `epoch`는 `None`이어야 함, key = `("candidates", sample.split, sample.row)`
    - 어긋나면 `CandidateError` (예: 학습 표본을 평가 key로 부르는 것 금지)
 2. `rng = np_rng(main_seed, *key)` = `np.random.Generator(np.random.PCG64(derive_seed(main_seed, *key)))` (M0 4.6.4). 표본마다 새로 만들고 다른 용도와 공유하지 않음
-3. 풀: `mask = np.ones(1682, dtype=bool)`, `mask[list(history)] = False`, `mask[target] = False`, `pool = np.flatnonzero(mask).astype(np.int64)`
-   - 오름차순, 길이 = 1,682 − len(history) − 1 = 1,671–1,678 (history는 중복 없음, target ∉ history)
+3. 풀 (`num_items` = `sample.num_items`, MovieLens 1682, D28): `mask = np.ones(num_items, dtype=bool)`, `mask[list(history)] = False`, `mask[target] = False`, `pool = np.flatnonzero(mask).astype(np.int64)` `R ilora/candidates.py negative_pool`
+   - 오름차순, 길이 = `num_items` − len(history) − 1 (MovieLens 1,671–1,678, Steam·LastFM은 23.2; history는 중복 없음, target ∉ history)
 4. **난수 호출 1:** `neg = rng.choice(pool, size=num_candidates - 1, replace=False)` (`p` 없음, `shuffle` 기본값 True 그대로)
 5. `cands = np.concatenate([neg, np.array([target], dtype=np.int64)])` → 정답이 index 19
 6. **난수 호출 2:** `rng.shuffle(cands)` (제자리)
@@ -821,6 +827,7 @@ def self_check() -> None                            # golden 비교 (6.6.5)
 - M11 (평가): `candidates_for(sample, main_seed=cfg.run.seed, epoch=None, cfg=cfg.candidates)`, `candidate_flags(cands, sample.target, catalog)` → `EvalRecord.cand_ids`, `cand_titles`, `flags`. 판정 정규화는 `match_norm`
 - M12·M14: flag별 표본 수와 flag 없는 표본만의 보조 지표를 보고에 씀 (값 정의는 M11·M12)
 - M13: 아래 완료 기준을 테스트로 구현
+- Steam·LastFM (23장): `candidates_for`가 `sample.num_items`로 풀을 만든다. key(D35)와 규칙은 그대로다 `R ilora/candidates.py candidates_for`
 
 #### 6.6.10 계약 추가 제안
 - `candidates_for`, `candidate_flags`, `FLAG_NAMES`, `match_norm`을 M2 공개 API로. `EvalRecord.flags`의 내용 = `candidate_flags` 결과
@@ -907,6 +914,8 @@ def self_check() -> None                            # golden 비교 (6.6.5)
 ### 7.6 설계
 
 #### 7.6.1 변환 도구 `tools/convert_sasrec.py` `[결정]`
+`--dataset {movielens, steam, lastfm}`(기본 movielens)로 데이터셋별 pickle blob·sha256, 데이터 폴더, 표본 수, `item_num`, 행 형식(평점 쌍 또는 int), 출력 이름 `sasrec_<dataset>_{state,reference}.pt`를 고른다 (23.5 M3) `R tools/convert_sasrec.py dataset_pins`, `R tools/convert_sasrec.py DatasetPins`. `check_pickle_file`, `check_observed`, `read_reference_samples`, `write_outputs`, `convert`는 keyword 인자 `dataset`(기본 `"movielens"`)을 받는다.
+
 ```python
 UPSTREAM_COMMIT = "28e47371192121b6ced44401d9e149fedfae13de"
 ORIGINAL_BLOBS = {"SASRecModules_ori.py": "3ac3c975a58d43ee866b637ee5d4f99534974a7b",
@@ -922,12 +931,12 @@ def materialize_original_sources(repo: Path, dest: Path) -> dict[str, str]      
 def scan_pickle_globals(pt_path: Path) -> frozenset[tuple[str, str]]               # 실행하지 않는 정적 검사
 def load_original_model(pt_path: Path, original_module: ModuleType) -> nn.Module
 def describe_original_model(model: nn.Module) -> dict                              # manifest "observed"
-def read_reference_samples(data_dir: Path) -> dict[str, tuple[list[str], torch.Tensor, torch.Tensor]]
+def read_reference_samples(data_dir: Path, *, dataset: str = "movielens") -> dict[str, tuple[list[str], torch.Tensor, torch.Tensor]]
 def compute_reference(model: nn.Module, hist_ids: torch.Tensor, len_seq: torch.Tensor) -> torch.Tensor
-def write_outputs(out_dir: Path, state: dict, reference: dict, manifest: dict) -> None
+def write_outputs(out_dir: Path, state: dict, reference: dict, manifest: dict, *, dataset: str = "movielens") -> None
 class ConversionError(RuntimeError): ...                                         # 거부 사유 (7.8 #1)
-def convert(repo: Path, out_dir: Path) -> dict                                    # 1–12단계, manifest 반환
-def build_parser() -> argparse.ArgumentParser                                    # --repo, --out. M14 RUNBOOK 시험이 명령 검사에 씀
+def convert(repo: Path, out_dir: Path, *, dataset: str = "movielens") -> dict      # 1–12단계, manifest 반환
+def build_parser() -> argparse.ArgumentParser                                    # --repo, --dataset, --out. M14 RUNBOOK 시험이 명령 검사에 씀
 ```
 - 실행: `python -I rebuild/tools/convert_sasrec.py --repo <저장소 루트> --out runs/rebuild/assets/sasrec`. CPU만, 난수 없음. 출력 폴더가 있고 비어 있지 않으면 거부 (덮어쓰기 금지, 4.6.3)
   - `--repo` 기본값은 도구가 든 저장소이고, 상대 경로 `--out`은 `--repo` 기준 `[결정]`: M0 경로 규칙(4.6.2)과 같음. 거부는 모두 `ConversionError`이고 `main`이 `convert_sasrec: refused: <사유>`를 출력한 뒤 1을 돌려줌 `R tools/convert_sasrec.py main`
@@ -1202,9 +1211,9 @@ def build_batch_plan(samples: Sequence[Sample], epoch: int, cfg: Config) -> Batc
 - `build_batch_plan(samples, epoch, cfg)` = `make_batch_plan(seed=cfg.run.seed, epoch=epoch, epochs=cfg.train.epochs, num_samples=len(samples), micro_batch_size=cfg.train.micro_batch_size, curriculum=cfg.prompt.train_curriculum)`. 그 전에 `samples`가 모두 `split == "train"`이고 `row`가 엄격히 오름차순(M1 `LoadedData.train`, full 또는 smoke)인지 확인, 아니면 `PromptError`
 
 #### 8.6.2 템플릿 읽기와 검증 (`load_templates`: 0–1단계 후 `parse_templates`: 2–6단계)
-0. 설정 `prompt.template_path`의 선택지는 `TEMPLATE_FILE` 하나 (8.6.8): M0 환경 점검이 해시를 확인하는 파일과 읽는 파일이 항상 같게 함 (M1 5.6.8의 데이터 경로 `[결정]`과 같은 이유)
+0. 설정 `prompt.template_path`의 선택지는 `prompt/movie.txt`(`TEMPLATE_FILE`), `prompt/game.txt`, `prompt/artist.txt` 셋이고 (8.6.8, D27) `load_templates(path, *, spec)`가 그 데이터셋의 해시를 쓴다 (23.5) `R ilora/prompts.py load_templates`: M0 환경 점검이 해시를 확인하는 파일과 읽는 파일이 항상 같게 함 (M1 5.6.8의 데이터 경로 `[결정]`과 같은 이유)
 1. 파일이 없으면 `PromptError` (공개 코드처럼 빈 목록으로 두지 않음)
-   - 읽기 전에 `run.content_sha256(path, text=True)`가 `run.EXPECTED_INPUTS[TEMPLATE_FILE][0]`(`957fc1f2…ecd3`)와 같은지 확인, 다르면 `PromptError(경로, 기대값, 실제값)`. 환경 점검을 거치지 않는 경로(CPU 시험, `smoke`)에서도 같은 내용만 쓰게 함
+   - 읽기 전에 `run.content_sha256(path, text=True)`가 `run.expected_inputs(spec.name)[spec.template_file][0]`(MovieLens `run.EXPECTED_INPUTS[TEMPLATE_FILE][0]` = `957fc1f2…ecd3`)와 같은지 확인, 다르면 `PromptError(경로, 기대값, 실제값)`. 환경 점검을 거치지 않는 경로(CPU 시험, `smoke`)에서도 같은 내용만 쓰게 함
 2. bytes를 UTF-8 strict로 decode → `str.splitlines()` → 줄마다 `strip()`. `U data/data_interface.py:185-186`과 같은 결과이고 `\r\n`·`\n` 파일이 같은 결과
 3. 줄이 하나도 없거나(빈 파일) 빈 줄이 하나라도 있으면 오류
 4. 템플릿마다 `re.findall(r"\[[^\[\]]*\]", t)`가 정확히 `[HistoryHere]` 1개와 `[CansHere]` 1개
@@ -1284,7 +1293,7 @@ epoch 4  945a6f7b8500cef6b852b7b85e879456bf14b9ee526f4c4101e87e0af1d9ec5f
 #### 8.6.8 설정 (`prompt` 구역)
 | 키 | 타입 | paper_spec 값 | 라벨 | 설명 |
 |---|---|---|---|---|
-| `template_path` | str (선택지 `prompt/movie.txt` 하나) | `prompt/movie.txt` | `[코드]` | 저장소 루트 기준. `U prompt/movie.txt:1-3`, `U train_movielens.sh:10`. 다른 값은 M0 해시 검사와 어긋나므로 거부, 읽을 때 해시 재확인 (8.6.2) |
+| `template_path` | str (선택지 `prompt/movie.txt`, `prompt/game.txt`, `prompt/artist.txt`, D27) | `prompt/movie.txt` | `[코드]` | 저장소 루트 기준. `U prompt/movie.txt:1-3`, `U train_movielens.sh:10`. 선택지 밖의 값은 거부(M0 해시 검사와 어긋나고 어느 데이터셋도 고르지 못함), 읽을 때 해시 재확인 (8.6.2) `R ilora/sections.py PromptConfig` |
 | `template_choice` | str (`random`, `fixed`) | `random` | `[LLaRA §5.1.2 p.7]` | D15. `fixed`는 `variant_fixed_template` |
 | `fixed_template_index` | int 또는 null | null | `[결정]` | `fixed`면 0–(n−1) 정수, `random`이면 null이어야 함. 변형 값 0 |
 | `train_curriculum` | str (`linear`, `all_hybrid`, `reverse`) | `linear` | `[LLaRA 간접 §4.3 p.6 식 9-11]` | D3. 나머지 둘은 변형 |
@@ -1523,7 +1532,7 @@ def make_eval_loader(data: LoadedData, split: str, cfg: Config, *,
 #### 9.6.6 padding과 텐서 (D22)
 - 학습 (`collate_train`): `L = max(n)`, `input_ids = seq + [pad]·(L − n)`, `attention_mask = [1]·n + [0]·(L − n)`, `labels = lab + [-100]·(L − n)`. 실제 토큰 position이 0부터 연속이라 position_ids 불필요
 - 평가 (`collate_eval`): `input_ids = [pad]·(L − n) + seq`, `attention_mask = [0]·(L − n) + [1]·n`. HF `padding_side="left"` 결과와 같음 (측정). position_ids는 생성 쪽이 mask로 만듦 (`T4.28 models/llama/modeling_llama.py:736-737`, M11)
-- `hist_ids[b] = history + [1682]·(10 − len)`, `len_seq[b] = len(history)`: M1 공유 함수 `data.pad_histories(histories, PAD_ID, HISTORY_LEN) -> (hist_ids [B, 10] int64, len_seq [B] int64)`(M1 5.6.13)로 만들고 M5 안에 따로 padding 코드를 두지 않음 (M3 `encode_all`, M12 export와 같은 함수). `cand_ids[b] = 후보`(M2 순서), `target_ids[b] = target`
+- `hist_ids[b] = history + [pad]·(10 − len)`(pad = `samples[0].num_items`, MovieLens 1682, 23.5 M5) `R ilora/batching.py _batch_common`, `len_seq[b] = len(history)`: M1 공유 함수 `data.pad_histories(histories, pad, HISTORY_LEN) -> (hist_ids [B, 10] int64, len_seq [B] int64)`(M1 5.6.13)로 만들고 M5 안에 따로 padding 코드를 두지 않음 (M3 `encode_all`, M12 export와 같은 함수). `cand_ids[b] = 후보`(M2 순서), `target_ids[b] = target`
 - `collate_train`·`collate_eval`은 공개 함수(9.6.1): dataset이 표본별 encoding 뒤 부르고, M13 과적합 점검(17.6.8)이 train 표본의 평가 형식 batch를 같은 함수로 만듦 (padding 규칙을 한 곳에)
 - 모두 `torch.int64` CPU 텐서. `B`는 학습 = micro-batch(8), 평가 = 그룹 크기
 - `pin_memory()`는 텐서마다 `.pin_memory()`한 사본, `to(device)`는 `non_blocking=True` 사본
@@ -2925,7 +2934,7 @@ def run_eval_command(cfg: Config, run_dir: Path, *, repo_root: Path, llm_path: P
 - `EvalRecord`·`SplitMetrics`·`EvalResult`는 `evaluate.py`에 둠. M12 `records.py`는 `EvalRecord`를 `read_eval_records` 안에서만 import하고, `write_eval`·`crosscheck_gates`는 필드를 이름으로 읽으며 필드 순서가 `records.EVAL_RECORD_FIELDS`와 같은지 확인함. `evaluate.py`도 M12 함수를 함수 안에서 import. 두 모듈 모두 상대를 module 수준에서 import하지 않아 순환이 없음 `[결정]` `R ilora/records.py read_eval_records`
 
 #### 15.6.2 평가 계획 (`evaluate_split` 앞부분)
-1. 검사 (`EvalError`): `split ∈ EVAL_SPLITS`, `CKPT_TAG_RE.fullmatch(ckpt_tag)`, `data.subset == "full"`이면 N == `FULL_SPLIT_SIZE[split]` (D17: val 94, test 95), smoke면 N == `data.smoke_users`의 해당 값 (D14), `torch.backends.cudnn.benchmark`가 False (15.6.10)
+1. 검사 (`EvalError`): `split ∈ EVAL_SPLITS`, `CKPT_TAG_RE.fullmatch(ckpt_tag)`, `data.subset == "full"`이면 N == 그 데이터셋의 `expected_samples[split]` (D17: MovieLens val 94, test 95, 값은 `FULL_SPLIT_SIZE`와 같음; Steam·LastFM은 23.2) `R ilora/evaluate.py _expected_size`, smoke면 N == `data.smoke_users`의 해당 값 (D14), `torch.backends.cudnn.benchmark`가 False (15.6.10)
 2. `samples = data.samples(split)`: M1 tuple 그대로 (행 오름차순), `expected_ids = [s.sample_id for s in samples]`
 3. 표본별 기대값 (main process, 189표본이라 비용 무시) `[결정]`
    - 후보 `candidates_for(s, main_seed=cfg.run.seed, epoch=None, cfg=cfg.candidates)`: key `("candidates", split, row)` (D10, M2 6.6.2)
@@ -3079,6 +3088,7 @@ def judge(first_line, cand_ids, cand_titles, target_title):
 - `meta` (M12 목록에 더해, `[SPEC §3]`의 시작·종료 시각과 경과 시간 포함)
   - 평가: `ckpt_meta`, `title_mode`, `eval_prompt`, `template_choice`, `eval_batch_size`, `n_batches`, `num_workers`, `precision`, `autocast_dtype`, `device`, `torch_num_threads` (평가 때 torch CPU thread 수, 15.6.10), `data_subset`, `smoke_users`, `started_utc`, `ended_utc`, `seconds`, `generation_seconds`, `batch_invariance_seconds`, `max_memory_allocated_gib` (CUDA만, CPU면 null: 평가 시작에 `reset_peak_memory_stats`, 끝에 읽고 다시 초기화해 M10 step 구간 측정과 섞이지 않게 함, 15.8 #18)
   - 생성·decode: `gen_strategy`, `max_new_tokens`, `min_new_tokens`, `repetition_penalty`, `pad_token_id`, `eos_token_id`, `skip_special_tokens: true`, `clean_up_tokenization_spaces: false`, 첫 줄 규칙 문자열 `first_line_rule` = `strip().split("\n")[0]`
+  - `dataset`: 데이터셋 이름 `spec_of(cfg).name` (MovieLens 실행은 `movielens`) `R ilora/evaluate.py _metrics_meta`
   - 입력 지문: `tokenizer_sha256`, `candidates_sha256` (M2 6.6.5 직렬화 `json.dumps([[row, list(cands)], …], separators=(",", ":"))`의 sha256), `template_counts` (템플릿 index 순서의 목록), `gate_calls` (주 평가의 `Router.gate_calls` 증가분, batch 1 점검 분은 `batch_invariance.json`의 `gate_calls_batch1`), `sasrec_state_digest`
   - full·seed 1234의 `candidates_sha256`은 val `9a073206…`, test `1ffdb649…` (M2 6.6.5), `template_choice = random`이면 `template_counts`는 val 30/33/31, test 22/36/37 (M4 8.6.3)이어야 함 (15.8 #10)
 
@@ -3597,6 +3607,7 @@ rebuild/
     test_m13_coverage.py     기준 번호 대응 누락·저장소 import·compileall (17.6.3)
     test_m14_profiles.py  test_m14_runbook.py  test_m14_compare.py   (M14 18.8)
     test_smoke_cpu.py        smoke 1단계 (17.6.6)
+    test_ds_*.py             Steam·LastFM 시험 (23.8: test_ds_spec, test_ds_profiles, test_ds_data, test_ds_candidates, test_ds_prompts, test_ds_convert, test_ds_smoke_cpu, test_ds_compare, test_ds_runbook, vessl/test_ds_run_outputs)
     vessl/
       conftest.py            ILORA_VESSL=1과 CUDA가 없으면 전부 skip
       test_vessl_env.py  test_vessl_sasrec.py  test_vessl_model.py  test_vessl_train.py
@@ -4106,6 +4117,7 @@ python -I rebuild/main.py smoke --config rebuild/configs/smoke_cpu.yaml
 
 - 모든 실험 seed 1234 (D2). 추가 seed(`--set run.seed=…`)는 계획 밖 (NOT_RUN)
 - 보조 평가 프로토콜 N = 92·88(D17)은 프로파일이 아니라 모든 test 평가가 함께 계산함 (M11 15.6.6)
+- Steam·LastFM의 실험 목록은 23장이다: 필수 E2·E2 재평가·E1·비교표, 선택 E3·E4·변형 (D44) `R RUNBOOK_datasets.md DS3`–`DS14`. 실행은 VESSL에서 하고 결과는 TBD
 - E1·E4·변형은 `extends: paper_spec.yaml`(또는 `cluster_hard.yaml`)로 다른 키만 적음 `[결정]`: "나머지는 E2와 같음"을 파일 구조로 보장. 해석된 설정 전체는 각 실행 폴더의 `config.yaml`에 남음 (M0)
 
 #### 18.6.2 설정 키 전체 (paper_spec 값)
@@ -4124,7 +4136,7 @@ python -I rebuild/main.py smoke --config rebuild/configs/smoke_cpu.yaml
 | `sasrec.state_path` | str | `runs/rebuild/assets/sasrec/sasrec_movielens_state.pt` | `[결정]` | 7.6.7. 변환 도구 출력 (R2) |
 | `sasrec.state_digest` | str | `6a78697b92ce8994250842dc780eac723285e5f51741264c09706e0057c51dae` | `[결정]` (prototype 계산값) | 7.6.2 |
 | `sasrec.reference_path` | str | `runs/rebuild/assets/sasrec/sasrec_movielens_reference.pt` | `[결정]` | 7.6.7 |
-| `prompt.template_path` | str {prompt/movie.txt} | `prompt/movie.txt` | `[코드]` | 8.6.8 |
+| `prompt.template_path` | str {prompt/movie.txt, prompt/game.txt, prompt/artist.txt} (D27) | `prompt/movie.txt` | `[코드]` | 8.6.8, 23.4 `R ilora/sections.py PromptConfig` |
 | `prompt.template_choice` | str {random, fixed} | random | `[LLaRA §5.1.2 p.7]` (D15) | 8.6.8 |
 | `prompt.fixed_template_index` | int 또는 null | null | `[결정]` | 8.6.8. random이면 null |
 | `prompt.train_curriculum` | str {linear, all_hybrid, reverse} | linear | `[LLaRA 간접 §4.3 p.6 식 9-11]` (D3) | 8.6.8 |
@@ -4420,6 +4432,8 @@ train:
 - R8 이후 명령은 `rec`가 기록한 `ILORA_*` 이름만 읽고 같은 사슬 앞에서 `need <이름>...`으로 기록 여부를 확인함 `[결정]`: 셸이 끊겨도 R0의 `source`로 경로가 돌아오고, 빈 경로가 `--set`에 들어가 엉뚱한 폴더나 모두 NOT_RUN인 비교표를 만들지 않음. `E2`·`R`·`CL` 같은 짧은 변수는 한 줄 안의 임시 이름 `R tests/test_m14_runbook.py test_paths_survive_a_new_shell`
 - 긴 실행(R5–R15)은 tmux 안에서 함. SSH·셸이 끊겨도 tmux 안 실행은 계속되므로 다시 접속하면 `tmux attach -t rebuild`로 붙어 끝났는지 먼저 봄 (재개 조건은 R7). Hugging Face token은 셸 환경 변수 `HF_TOKEN`으로만 쓰고 파일·명령 기록에 적지 않음
 
+**Steam·LastFM.** 실행 문서는 `rebuild/RUNBOOK_datasets.md`다 (23.6, D43) `R RUNBOOK_datasets.md DS0`. `RUNBOOK.md`와 `configs/` 17개 파일은 바꾸지 않았다 (23.7 (e)).
+
 **R0. 매 셸 준비** (workspace에서 처음이면 R1로 clone과 env를 먼저 만듦)
 ```bash
 cd ~/iLoRA                                         # 저장소 루트
@@ -4636,10 +4650,12 @@ tar -czf ~/rebuild_runs_$(date -u +%Y%m%dT%H%M%SZ).tgz runs/rebuild
   - 역산: N 80–95, 네 자리 반올림에서 각 행의 정수해는 위 하나뿐 (계산 `design/tmp/m1314/backsolve.py`, D17과 같음). iLoRA 행은 N = 92(batch 4 + drop_last, M11 15.6.6), LLaRA 행은 N = 95
   - 논문 Imp.% 19.32% = 0.5275/0.4421 − 1은 분모·N이 다른 두 수의 비. 우리는 같은 프로토콜 값끼리만 비교함
   - 대조 판정 기준은 두지 않음 `[결정]`: 단일 seed(D2), 표본 하나 = 1/95 ≈ 0.0105, 학습 GPU 비결정성(D16), 기준값의 실행 조건 차이(18.6.10) 때문에 "재현 성공" 경계를 근거 있게 정할 수 없음. 차이를 정답 수(표본 단위)로 적고 Wilson 구간은 M11 `supplementary`에만 둠
+  - Steam·LastFM의 행과 우리 쪽 대조 값은 23장이다 (D41, 23.2): LLaRA 행은 E1 전체 프로토콜과 대조, iLoRA 행은 개수 대신 이유 문구 (`counts_text`) `R tools/compare_runs.py PAPER_REFERENCE_STEAM`, `R tools/compare_runs.py PAPER_REFERENCE_LASTFM`
 - **표 E. 우리 실행끼리 짝 비교** (같은 프로토콜, test 같은 95표본·같은 후보·템플릿: D10·D15, M2 6.6.6. best_val checkpoint(D11 (a))의 전체 프로토콜 `records.jsonl`이고, 두 기록의 표본·순서·후보·템플릿·정답이 같은지 먼저 확인 `[결정]`. B의 CombinedMetric이 0이면 비는 NOT_RUN): E2 vs E1, E4 vs E2, E3 vs E2의 정답 수 차, 한쪽만 맞힌 표본 수(불일치 쌍), CombinedMetric 비 − 1 (Imp.과 같은 꼴). 검정·판정 없이 수만 적음 `[결정]`. 모두 TBD
 - **표 F. gate·군집 요약** (값 TBD): E2 test `gate_summary.json`의 expert 평균, argmax 분포, entropy·JS 통계 (M12 16.6.6), E4 평가 gate의 argmax 분포(one-hot 확인), 군집 크기·silhouette·NMI (M15 19.6.6)
 
 #### 18.6.8 비교 도구 `rebuild/tools/compare_runs.py` `[결정]`
+- 실행의 `prompt.template_path`로 데이터셋을 읽어 표 D·한계·정의 문구를 데이터셋별로 고르고 (`PAPER_TEXTS`, `protocol_definition`), 데이터셋이 섞이면 `CompareError` (23.5 M14) `R tools/compare_runs.py comparison_dataset`. 쓸 수 있는 실행이 하나도 없으면 고를 데이터셋이 없어 MovieLens 문구를 유지하고(모든 칸이 NOT_RUN), 쓸 수 있는 실행의 `prompt.template_path`가 없거나 모르는 값이면 `CompareError` `R tools/compare_runs.py run_dataset`. MovieLens 출력은 그대로다 (23.7 (f))
 - 명령: `python -I rebuild/tools/compare_runs.py --run <이름>=<실행 폴더> … [--export <이름>=<폴더> …] [--cluster <폴더>] [--root <폴더>]`. M0 `create_run_dir("compare")`로 `<root>/compare_<UTC>/`(기본 `runs/rebuild/compare_<UTC>/`)를 만들고 M0 `start_meta`·`tracked_run`으로 `meta.json` 상태를 남김 (R14의 `done_ok` 확인)
   - `--root` `[결정]`: 시험이 비교 폴더를 tmp에 써야 함 (17.8 #4). 실행 폴더 값은 절대 경로 또는 저장소 루트 기준(M0), 빈 값은 주지 않은 것. 종료 코드: 인자 오류(`--run` 없음, 이름 중복·형식) 2, `CompareError` 1, 그 밖 0이고 새 폴더 경로를 출력. `meta.json`: `command` `compare`, `compare_inputs`, `compare`(출력 파일 sha256, NOT_RUN 이유), seed null, `config_hash` = 입력 목록의 sha256. Python API `run_compare(runs, exports=None, cluster=None, *, root, repo_root, argv) -> Path`, `build_report`, `build_parser`, `main`, `CompareError` `R tools/compare_runs.py run_compare`
 - 읽는 파일만으로 표를 만듦: 학습 실행은 `config.yaml`, `meta.json`, `eval/selection.json`, `eval/epoch{a,b}/test/metrics.json`, `records/train/run_summary.json`, `eval/epoch{a}/test/records.jsonl`(짝 비교). eval 실행(E3)은 `eval/summary.json`과 원 실행의 `selection.json`, 자기 `eval/epoch{a,b}/test/{metrics.json, records.jsonl}`(값과 출처, `summary.json`의 `metrics.json` sha256과 대조)와 `meta.json`(ElapsedTime), TrainableParams는 원 학습 실행의 `run_summary.json`. 표 F와 18.6.9를 위해 export 실행의 `records/analysis/epoch{a}/test/gate_summary.json`·`gate_interpretation.txt`, 군집 실행의 `cluster/cluster_summary.json`·`manifest.json`(`kmeans_file`)
@@ -4682,11 +4698,14 @@ tar -czf ~/rebuild_runs_$(date -u +%Y%m%dT%H%M%SZ).tgz runs/rebuild
 8. **E3:** 평가 prompt만 바꿈. 모델은 curriculum(D3)으로 text-only도 학습했으므로 E3은 "text-only로 학습한 모델"의 결과가 아님
 9. **precision (D9):** 비교한 실행 중 `model.torch_dtype`·`train.precision`이 주 설정(`float16`·`fp16_amp`)이 아닌 것이 있으면 적음. 모두 같으면 기록된 편차(`variant_bf16`, CPU smoke), 서로 다르면 짝 차이에 precision 차이도 섞임. 비교 도구가 각 실행의 `config.yaml`에서 읽어 필요할 때만 한계에 더함 `R tools/compare_runs.py precision_note`
 
+Steam·LastFM의 값이 다른 항목(N과 상한 23.2, 제목 규칙 D38, 평가 N D41)은 23장을 쓴다: 위 3–5번 항목을 그 데이터셋의 문구로 바꾸고 나머지 항목은 그대로 쓴다 `R tools/compare_runs.py PAPER_TEXTS`.
+
 #### 18.6.11 시간·비용·디스크
 - 시간: 측정 전 TBD. 실행마다 `meta.json`(`started_utc`, `ended_utc`, `elapsed_s`)과 `epochs.csv`(`train_s`, `val_s`, `save_s`)로 기록 `[SPEC §0.14]`
 - 비용: VESSL 청구 정보가 없으면 적지 않음 (추정값을 결과처럼 쓰지 않음) `[SPEC §0.14]`
 - 디스크 (M10 14.6.6의 epoch당 checkpoint 약 424 MiB로 계산): 학습 실행 하나(5 epoch) 약 2.07 GiB → E1·E2·E4 약 6.2 GiB, `overfit_gpu` 25 epoch 약 10.35 GiB, `smoke_gpu_100` 4 epoch분 약 1.66 GiB, 변형 하나 약 2.07 GiB. 평가·export·군집 산출물은 이보다 작음 (크기 측정은 TBD). fork 안내의 여유 약 100 GB(`F experiments/VESSL_GUIDE.md:17`) 안
 - GPU 메모리: smoke 2단계와 E2에서 측정 (M8-12, M9-17, M10-15), TBD
+- Steam·LastFM의 시간과 메모리는 23.9의 추정이고 실제 값은 TBD다 (VESSL 실행 전)
 
 #### 18.6.12 다른 모듈과의 연결, 계약 추가 제안, 발견한 불일치
 - **연결:** 모든 모듈 설정 표(키 이름·라벨의 원본), M0 명령과 실행 폴더 규칙, M10 재개, M11 eval 명령·`metrics.json`·`summary.json`, M12 export·분석 파일, M15 군집 산출물, M13 smoke·시험 명령
@@ -4853,7 +4872,7 @@ def verify_live_encoder(artifacts: ClusterArtifacts, encoder: SASRecEncoder, sam
 - 대조: numpy float64로 중심까지 제곱거리를 계산해 최근접 군집을 다시 구하고 sklearn 결과와 비교. 불일치 수·sample_id, 가장 가까운 두 거리(`sq_dist_1`, `sq_dist_2`)를 CSV와 summary에 기록 (실수 `'%.9g'`)
 - train 군집 중 하나라도 비면 실패 (그 expert가 학습되지 않음)
 - 저장: joblib, `centroids.npz`, 배정 CSV. 저장 뒤 joblib을 다시 읽어 세 split을 predict해 CSV와 같아야 함 (`unit = user`는 train CSV가 사용자의 군집을 담으므로 `train_user_assignments.csv` = fit window의 predict, train CSV = 그 사용자 군집, validation·test CSV = predict로 대조 `[결정]`). 재로드 모델과 `centroids.npz`의 중심도 fit 결과와 bit 단위로 같아야 함 `R ilora/cluster.py verify_saved_model`
-- `manifest.json`: 모든 산출물 sha256, SASRec 가중치(변환본) sha256·digest, 데이터 파일 4개(`data/ref/movielens/*`)의 sha256(M0 `meta.json` `inputs`의 같은 값. `prompt/movie.txt`와 원본 SASRec pickle은 넣지 않음 `[결정]`: SASRec은 변환본 sha256·digest로 묶음), `data.subset`(`full`/`smoke`)과 smoke면 `data.smoke_users`·`data.train_rows`, fit sample_id sha256, `cluster` 구역 설정, scikit-learn·threadpoolctl·numpy 버전(joblib·scipy·torch도), `threadpool_info()`. 그 밖에 `format`(`ilora-rebuild-cluster-v1`), split별 행 수 `rows`, `kmeans_file`(M14 비교 도구가 읽음), `data.seed`·`title_mode`, z 계산 설정, `dynamic_export`, `created_utc`
+- `manifest.json`: 모든 산출물 sha256, SASRec 가중치(변환본) sha256·digest, 데이터 파일 4개(`data/ref/movielens/*`; Steam·LastFM은 `spec.data_files` `R ilora/cluster.py run_cluster`)의 sha256(M0 `meta.json` `inputs`의 같은 값. `prompt/movie.txt`와 원본 SASRec pickle은 넣지 않음 `[결정]`: SASRec은 변환본 sha256·digest로 묶음), `data.subset`(`full`/`smoke`)과 smoke면 `data.smoke_users`·`data.train_rows`, fit sample_id sha256, `cluster` 구역 설정, scikit-learn·threadpoolctl·numpy 버전(joblib·scipy·torch도), `threadpool_info()`. 그 밖에 `format`(`ilora-rebuild-cluster-v1`), split별 행 수 `rows`, `kmeans_file`(M14 비교 도구가 읽음), `data.seed`·`title_mode`, z 계산 설정, `dynamic_export`, `created_utc`
 
 #### 19.6.6 `cluster_summary.json` `[SPEC §7]`
 - 설정과 버전 (19.6.4), `fit`: split, 행 수, sha256, inertia, n_iter, `labels_`·predict 불일치 수, numpy 대조 불일치 수
@@ -4970,30 +4989,51 @@ def verify_live_encoder(artifacts: ClusterArtifacts, encoder: SASRecEncoder, sam
 |---|---|---|---|---|---|
 | D1 | gate 구조 | ω = Softmax(W_g z), W_g ∈ R^{4×64}, bias·은닉층·정규화 없음. 공유 gate 1개가 sequence마다 ω 하나를 만들어 모든 MoE-LoRA 층·토큰·생성 단계에 씀 | `[논문 p.6 §3.2.2 식 11]`, K = 4 `[논문 p.9 §4.3.2]`, 공유 `[논문 p.4 그림 2, p.7 그림 3c (암시)]`. 논문-코드 충돌: 코드는 BatchNorm1d 19개 1D CNN + bias 있는 Linear(64→4) `U model/router/nlpr.py:39-84` | 없음 (CNN router는 재구현하지 않음, D26) | M7 |
 | D2 | seed 수 | 1234 단일 실행 | LLM 방법 seed는 두 논문 모두 없음, `[SPEC §0.6]`, `U main.py:84`, `L main.py:84` | 추가 seed는 후속 선택 실험 (NOT_RUN) | M14 |
-| D3 | 학습 prompt와 curriculum | LLaRA 식 9-11: micro-batch마다 확률 p(τ) = τ/T로 hybrid, 아니면 text-only. τ = 전체 학습의 micro-batch 번호(1부터), T = 전체 micro-batch 수(5 × 8,265 = 41,325), 마지막 micro-batch는 p = 1. 추첨은 `derive_seed(seed, "curriculum", τ)`. batch 안 모든 표본이 같은 형식 | `[LLaRA 간접 §4.3 p.6 식 9-11]` (p(τ)는 시각 τ의 하나의 추첨 I(τ)가 모든 표본에 공통). τ 단위·1부터 시작·batch 단위 추첨은 `[코드]` `U data/data_interface.py:28, :38-40, :67`, `L data/data_interface.py:40` (cur_step 1부터, collate마다 증가). 코드의 worker별 카운터 초기화는 결함 | `all_hybrid`(iLoRA 식 6-8 문자적), `reverse`(2024-08 방향: hybrid 확률 1 − τ/T) | M4, M10 |
+| D3 | 학습 prompt와 curriculum | LLaRA 식 9-11: micro-batch마다 확률 p(τ) = τ/T로 hybrid, 아니면 text-only. τ = 전체 학습의 micro-batch 번호(1부터), T = 전체 micro-batch 수(5 × 8,265 = 41,325) (MovieLens; Steam·LastFM은 23.2, D29–D42), 마지막 micro-batch는 p = 1. 추첨은 `derive_seed(seed, "curriculum", τ)`. batch 안 모든 표본이 같은 형식 | `[LLaRA 간접 §4.3 p.6 식 9-11]` (p(τ)는 시각 τ의 하나의 추첨 I(τ)가 모든 표본에 공통). τ 단위·1부터 시작·batch 단위 추첨은 `[코드]` `U data/data_interface.py:28, :38-40, :67`, `L data/data_interface.py:40` (cur_step 1부터, collate마다 증가). 코드의 worker별 카운터 초기화는 결함 | `all_hybrid`(iLoRA 식 6-8 문자적), `reverse`(2024-08 방향: hybrid 확률 1 − τ/T) | M4, M10 |
 | D4 | 평가 prompt | hybrid | 입력은 hybrid `[논문 p.4 식 6-7, p.5 식 8 (암시)]`, "fully integrated with the hybrid item representation" `[LLaRA §4.3 p.6]` | `text_only` (2024-08 코드 평가 방식, E3) | M4, M11 |
-| D5 | 최대 lr | 1e-4 | `[논문 App E p.17]`. 논문-코드 충돌: 공개 스크립트 8e-4(LLaRA 2024-07 값 복사) | `variant_released_lr`: 8e-4 / 8e-6 / 8e-6 | M10 |
-| D6 | warmup과 lr 최솟값 | warmup 시작 1e-6, 최솟값 1e-6, warmup 길이 = 전체 optimizer step // 20 = 129, 선형 증가 후 이어지는 cosine | 시작값 1/100 `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`, cosine `[논문 App E p.17]`. 최솟값·warmup 길이는 `[코드]` `U main.py:90-91`, `U model/model_interface.py:248`, `U optims.py:20-36` | D5 변형과 함께 | M10 |
+| D5 | 최대 lr | 1e-4 (MovieLens; Steam·LastFM은 23.2, D29–D42) | `[논문 App E p.17]`. 논문-코드 충돌: 공개 스크립트 8e-4(LLaRA 2024-07 값 복사) | `variant_released_lr`: 8e-4 / 8e-6 / 8e-6 | M10 |
+| D6 | warmup과 lr 최솟값 | warmup 시작 1e-6, 최솟값 1e-6, warmup 길이 = 전체 optimizer step // 20 = 129 (MovieLens; Steam·LastFM은 23.2, D29–D42), 선형 증가 후 이어지는 cosine | 시작값 1/100 `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`, cosine `[논문 App E p.17]`. 최솟값·warmup 길이는 `[코드]` `U main.py:90-91`, `U model/model_interface.py:248`, `U optims.py:20-36` | D5 변형과 함께 | M10 |
 | D7 | r, α, dropout, 대상 모듈 | 8, 32, 0.1, 32층 × q/k/v/o/gate/up/down_proj = 224 모듈 | 값은 두 논문 모두 없음. 대상은 "transformer layers" `[논문 p.6 §3.2.3]`, gate_proj 암시 `[논문 App C p.17]`. `[코드]` 계보 일치 `U main.py:128-130`, `L model/model_interface.py:215-220`, LLaRA checkpoint hparams | 없음 | M8 |
 | D8 | scaling 규칙 | 각 expert에 α/r* = α/(r/K) = 32/2 = 16. h' = Wh + Σ_k ω_k (α/r*) B_k A_k h. K = 1이면 α/r = 4 | `[결정]` (아래 20.1). 논문 모호: 식 3은 표준 LoRA의 α/r만 정의하고 iLoRA 결합 순전파의 scaling은 쓰지 않음 `[논문 p.3 식 3, p.5 식 9, p.6 식 12]`. `[코드]` `U model/peft/tuners/moelora.py:618` | `variant_total_rank_scaling`: α/r = 4 (식 12를 식 3에 대입한 해석) | M8 |
 | D9 | precision | 확정 (20.2) | | bf16 (불안정할 때만) | M9, M10 |
-| D10 | 후보 | 정답 포함 20개(음성 19), 균등 비복원 추출 후 섞음. 평가 후보는 `(seed, split, row)`로 고정, 학습 후보는 `(seed, "train", row, epoch)`로 결정적 재추출 | 20개 `[논문 App B p.16]` `[LLaRA §5.1.3 p.7]`(정답 포함 여부 모호 → `[코드]` 정답 포함 20, `U data/movielens_data.py:44-47`, `U prompt/movie.txt:1-2` "20 movie titles"). 학습 prompt에도 후보 `[LLaRA 간접 §4.2 p.5]`. 고정 방식은 `[결정]`: 평가는 결정적이어야 하고(1.3), 학습은 코드처럼 매번 다른 후보를 보되 worker와 무관하게 | 없음 | M2, M11 |
-| D11 | epoch와 checkpoint 선택 | 5 epoch, 매 epoch 끝 validation(94명)과 전체 상태 저장. test는 (a) validation CombinedMetric 최고 epoch(동률이면 늦은 epoch)와 (b) 마지막 epoch를 둘 다 평가·보고, 주 결과는 (a) | 5 epoch `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`. 선택 기준은 두 논문 모두 없음 → `[결정]`, `[코드]` 계보: `U main.py:23-32`(monitor `metric`, 모두 저장), LLaRA 2024-07 공개 checkpoint = validation 최고 epoch 2 | 없음 (선택 규칙은 학습 전에 고정, test로 고르지 않음) | M10, M14 |
+| D10 | 후보 | 정답 포함 20개(음성 19), 균등 비복원 추출 후 섞음 (MovieLens; Steam·LastFM은 23.2, D29–D42). 평가 후보는 `(seed, split, row)`로 고정, 학습 후보는 `(seed, "train", row, epoch)`로 결정적 재추출 | 20개 `[논문 App B p.16]` `[LLaRA §5.1.3 p.7]`(정답 포함 여부 모호 → `[코드]` 정답 포함 20, `U data/movielens_data.py:44-47`, `U prompt/movie.txt:1-2` "20 movie titles"). 학습 prompt에도 후보 `[LLaRA 간접 §4.2 p.5]`. 고정 방식은 `[결정]`: 평가는 결정적이어야 하고(1.3), 학습은 코드처럼 매번 다른 후보를 보되 worker와 무관하게 | 없음 | M2, M11 |
+| D11 | epoch와 checkpoint 선택 | 5 epoch, 매 epoch 끝 validation(94명; MovieLens, Steam·LastFM은 23.2, D29–D42)과 전체 상태 저장. test는 (a) validation CombinedMetric 최고 epoch(동률이면 늦은 epoch)와 (b) 마지막 epoch를 둘 다 평가·보고, 주 결과는 (a) | 5 epoch `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`. 선택 기준은 두 논문 모두 없음 → `[결정]`, `[코드]` 계보: `U main.py:23-32`(monitor `metric`, 모두 저장), LLaRA 2024-07 공개 checkpoint = validation 최고 epoch 2 | 없음 (선택 규칙은 학습 전에 고정, test로 고르지 않음) | M10, M14 |
 | D12 | SASRec dropout | 항상 eval 모드 (dropout 끔) | SR-EMB 고정 `[논문 p.4 그림 2 (암시)]`, "well-trained and frozen" `[LLaRA 그림 2 caption p.4]`. `[결정]`: 식 10의 z가 이력만의 결정적 함수가 되고 KMeans 입력과 gate 입력이 같아짐 `[SPEC §10]`. 코드는 의도(eval)와 실제(Lightning이 train으로 바꿈)가 다름 | 없음 | M3 |
 | D13 | 프레임워크와 버전 | 확정 (20.2) | | | M0, M9 |
-| D14 | 사용자 ID와 smoke 데이터 | pseudo 사용자 ID: train은 연속 블록 번호 0–753, validation 754–847, test 848–942 (행 순서). smoke: train 80명(그 사용자의 모든 window), validation 10명, test 10명을 `("smoke_users", split)`로 선택 | 논문은 사용자 ID를 쓰지 않음. 8:1:1 `[LLaRA §5.1.1 p.7]`, 943 sequence `[LLaRA Table 1 p.7]` = 754 + 94 + 95. `[결정]`: 배포 파일만으로 복원 가능(감식: 754 블록 재구성과 0행 차이). 100명 smoke는 교수님 구두 제안 | 없음 | M1, M13 |
-| D15 | 템플릿 | `U prompt/movie.txt` 3개(줄 끝 strip), 학습·평가 모두 표본마다 무작위. 학습 `("template", "train", row, epoch)`, 평가 `("template", split, row)` | "the instruction format for training and testing is randomly sampled from several prompts" `[LLaRA §5.1.2 p.7]`. 내용 `[코드]` `U prompt/movie.txt:1-3`, `U data/data_interface.py:182-190`. 표본 단위는 `[결정]`: batch 구성과 무관하게 결정적 (코드는 batch마다 1개) | `variant_fixed_template` (0번 고정) | M4 |
+| D14 | 사용자 ID와 smoke 데이터 | pseudo 사용자 ID: train은 연속 블록 번호 0–753, validation 754–847, test 848–942 (행 순서, MovieLens; Steam·LastFM은 23.2, D29–D42). smoke: train 80명(그 사용자의 모든 window), validation 10명, test 10명을 `("smoke_users", split)`로 선택 | 논문은 사용자 ID를 쓰지 않음. 8:1:1 `[LLaRA §5.1.1 p.7]`, 943 sequence `[LLaRA Table 1 p.7]` = 754 + 94 + 95. `[결정]`: 배포 파일만으로 복원 가능(감식: 754 블록 재구성과 0행 차이). 100명 smoke는 교수님 구두 제안 | 없음 | M1, M13 |
+| D15 | 템플릿 | `U prompt/movie.txt` 3개(줄 끝 strip, MovieLens; Steam·LastFM은 23.2, D29–D42), 학습·평가 모두 표본마다 무작위. 학습 `("template", "train", row, epoch)`, 평가 `("template", split, row)` | "the instruction format for training and testing is randomly sampled from several prompts" `[LLaRA §5.1.2 p.7]`. 내용 `[코드]` `U prompt/movie.txt:1-3`, `U data/data_interface.py:182-190`. 표본 단위는 `[결정]`: batch 구성과 무관하게 결정적 (코드는 batch마다 1개) | `variant_fixed_template` (0번 고정) | M4 |
 | D16 | 학습 결정성 수준 | 평가는 결정적, 학습은 GPU 비결정성 허용. 같은 seed 재실행 편차 측정은 후속 선택 실험 | 두 논문·코드 언급 없음 (`U main.py:40`). `[결정]`: `torch.use_deterministic_algorithms`는 느리고 일부 연산 미지원 | 없음 | M0, M10 |
-| D17 | 지표 이름과 분모 | ValidRatio = 유효/전체, HR@1 = 정답/유효(구현 `hr`), CombinedMetric = HR@1 × ValidRatio = 정답/전체(구현 `metric`). 평가 N = split 전체(test 95, validation 94), drop_last 없음 | ValidRatio "over all sequences" `[논문 p.6, App B p.16]` `[LLaRA §5.1.3 p.7]`. HR@1 분모는 두 논문 모두 모호. 이름과 정의는 `[코드]` `U model/model_interface.py:180-184, :487-491` `[SPEC §12]`. 역산: iLoRA Table 1 0.5275 = 48/91(정답/유효, N=92), LLaRA Table 2 0.4421 = 42/95(정답/전체) | 보조 프로토콜 N=92(batch 4 + drop_last), N=88(batch 8 + drop_last) | M11, M14 |
+| D17 | 지표 이름과 분모 | ValidRatio = 유효/전체, HR@1 = 정답/유효(구현 `hr`), CombinedMetric = HR@1 × ValidRatio = 정답/전체(구현 `metric`). 평가 N = split 전체(test 95, validation 94; MovieLens, Steam·LastFM은 23.2, D29–D42), drop_last 없음 | ValidRatio "over all sequences" `[논문 p.6, App B p.16]` `[LLaRA §5.1.3 p.7]`. HR@1 분모는 두 논문 모두 모호. 이름과 정의는 `[코드]` `U model/model_interface.py:180-184, :487-491` `[SPEC §12]`. 역산: iLoRA Table 1 0.5275 = 48/91(정답/유효, N=92), LLaRA Table 2 0.4421 = 42/95(정답/전체) | 보조 프로토콜 N=92(batch 4 + drop_last), N=88(batch 8 + drop_last) | M11, M14 |
 | D18 | 학습 label | 입력 = `[BOS] + prompt + 응답`, 응답 = 정답 제목 + `"\n"`, label은 응답 토큰만. 두 번째 `[BOS]` 없음 | y = 다음 아이템의 텍스트 토큰 `[LLaRA 간접 §4.2 p.5]`, 식 2 `[논문 p.3]`. `[결정]`: 코드의 두 번째 `[BOS]`는 4.28.0 slow tokenizer 쌍 인코딩의 부산물(`U data/data_interface.py:73-82`, `U model/model_interface.py:38-42`)이고 4.29.0부터 shape 오류 | `variant_released_label` (두 번째 `[BOS]` 포함) | M5 |
 | D19 | gate lr과 weight decay | gate lr = 다른 학습 parameter와 같은 lr 곡선(×1). weight decay 1e-5는 projector·gate에만, LoRA는 0 (Adam의 coupled L2) | projector는 "the same learning rate curve integrated with iLoRA" `[논문 App E p.17]`, gate는 iLoRA 구성요소 `[논문 p.5 §3.2 (2)]` → ×1 `(암시)`. weight decay 값 `[v1 App E p.16]`, 적용 범위는 논문 없음 → `[코드]` `U model/model_interface.py:227-232`. 코드의 router ×0.3은 CNN router용 | `variant_released_gate_lr` (×0.3) | M7, M10 |
-| D20 | 제목 정규화 | 공개 코드 정규화 그대로 (끝 7자 제거, `", The"`·`", A"`·`", An"` 이동). 결함은 기록하고 평가 기록에 표본별 모호 표시 | `[코드]` `U data/movielens_data.py:61-66, :74` (`L` 같은 blob). `[결정]`: LLaRA 배포 데이터 처리의 일부라 p.6 §4 "exactly the same experimental settings"로 유지해야 논문 수치와 비교 가능 | `variant_fixed_titles` (관사 순서, item 266 빈 제목, 잘림·끝 공백 수정) | M1, M2, M11 |
-| D21 | 음성 후보 풀 | 1,682개 중 보이는 이력 window(최대 10)와 정답을 뺀 아이템 | "non-interacted" `[논문 App B p.16]`의 기준 미기재. `[코드]` `U data/movielens_data.py:45`. validation·test 사용자의 전체 이력은 배포 파일에 없음 | 없음 | M2 |
+| D20 | 제목 정규화 | 공개 코드 정규화 그대로 (끝 7자 제거, `", The"`·`", A"`·`", An"` 이동; MovieLens, Steam·LastFM은 23.2, D29–D42). 결함은 기록하고 평가 기록에 표본별 모호 표시 | `[코드]` `U data/movielens_data.py:61-66, :74` (`L` 같은 blob). `[결정]`: LLaRA 배포 데이터 처리의 일부라 p.6 §4 "exactly the same experimental settings"로 유지해야 논문 수치와 비교 가능 | `variant_fixed_titles` (관사 순서, item 266 빈 제목, 잘림·끝 공백 수정) | M1, M2, M11 |
+| D21 | 음성 후보 풀 | 1,682개 중 보이는 이력 window(최대 10)와 정답을 뺀 아이템 (MovieLens; Steam·LastFM은 23.2, D29–D42) | "non-interacted" `[논문 App B p.16]`의 기준 미기재. `[코드]` `U data/movielens_data.py:45`. validation·test 사용자의 전체 이력은 배포 파일에 없음 | 없음 | M2 |
 | D22 | padding 방향 | 학습 오른쪽, 생성 왼쪽 + attention mask 기반 position_ids | `[결정]`: 코드의 오른쪽 padding 생성은 짧은 prompt의 첫 토큰을 `[PAD]` 뒤에서 예측 (`U model/model_interface.py:316`, `U debug/utils.py:2260`). transformers 4.28.0 `prepare_inputs_for_generation`이 mask로 position_ids를 만듦 | 없음 | M5, M11 |
 | D23 | SASRec 계산 정밀도 | fp32, autocast 밖 | 근거 없음 → `[결정]`: gate 입력과 KMeans 입력을 같은 값으로 고정 | 없음 | M3 |
-| D24 | epoch 끝 부분 accumulation | 모든 micro-batch 손실을 grad_accum(16)으로 나눔. 각 epoch의 마지막 9 micro-batch(8,265 = 16 × 516 + 9)도 16으로 나누고 optimizer step 1회. epoch당 517 step, 전체 2,585 step. step 기록의 `loss_mean`은 그 step `n_micro`개의 평균 그대로 | `[코드]`: `U main.py:57`(`Trainer.from_argparse_args`), `U train_movielens.sh:6`(`--accumulate_grad_batches 16`). Lightning 1.8.6은 micro-batch마다 손실을 `accumulate_grad_batches`로 나누고(`PL1.8.6 loops/optimization/optimizer_loop.py:88, :416`) epoch 마지막 batch에서도 step함(`PL1.8.6 loops/epoch/training_epoch_loop.py:333-337`). 두 논문은 부분 창을 말하지 않음(batch 128만, `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`). 16으로 나누는 것은 결함이 아님: 마지막 창도 micro-batch마다 무게 1/16. 공개 코드의 max_steps 2,583 절단은 결함(epoch 4가 8,240/8,265에서 멈춤, 14.5)이라 따르지 않음. 이전 `[결정]`(그 step의 실제 수로 평균)은 이유가 없어 2026-11-06에 이 `[코드]`로 바꿈 `R ilora/train.py accumulate_window` | 없음 | M10 |
-| D25 | E4 군집 단위 | 표본(sequence) 단위: train 66,126 표본의 z로 KMeans fit, validation·test 표본은 predict | `[결정]`: dynamic gate가 sequence마다 ω를 만드는 것과 같은 단위(식 10-11), 공개 코드도 이 표현을 "user embedding"이라 부름(`U model/model_interface.py:416-421`). `[SPEC §7]` "user/sequence" | `variant_user_level_cluster` (pseudo 사용자 단위) | M15 |
+| D24 | epoch 끝 부분 accumulation | 모든 micro-batch 손실을 grad_accum(16)으로 나눔. 각 epoch의 마지막 9 micro-batch(8,265 = 16 × 516 + 9)도 16으로 나누고 optimizer step 1회. epoch당 517 step, 전체 2,585 step (MovieLens; Steam·LastFM은 23.2, D29–D42). step 기록의 `loss_mean`은 그 step `n_micro`개의 평균 그대로 | `[코드]`: `U main.py:57`(`Trainer.from_argparse_args`), `U train_movielens.sh:6`(`--accumulate_grad_batches 16`). Lightning 1.8.6은 micro-batch마다 손실을 `accumulate_grad_batches`로 나누고(`PL1.8.6 loops/optimization/optimizer_loop.py:88, :416`) epoch 마지막 batch에서도 step함(`PL1.8.6 loops/epoch/training_epoch_loop.py:333-337`). 두 논문은 부분 창을 말하지 않음(batch 128만, `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`). 16으로 나누는 것은 결함이 아님: 마지막 창도 micro-batch마다 무게 1/16. 공개 코드의 max_steps 2,583 절단은 결함(epoch 4가 8,240/8,265에서 멈춤, 14.5)이라 따르지 않음. 이전 `[결정]`(그 step의 실제 수로 평균)은 이유가 없어 2026-11-06에 이 `[코드]`로 바꿈 `R ilora/train.py accumulate_window` | 없음 | M10 |
+| D25 | E4 군집 단위 | 표본(sequence) 단위: train 66,126 표본(MovieLens; Steam·LastFM은 23.2, D29–D42)의 z로 KMeans fit, validation·test 표본은 predict | `[결정]`: dynamic gate가 sequence마다 ω를 만드는 것과 같은 단위(식 10-11), 공개 코드도 이 표현을 "user embedding"이라 부름(`U model/model_interface.py:416-421`). `[SPEC §7]` "user/sequence" | `variant_user_level_cluster` (pseudo 사용자 단위) | M15 |
 | D26 | 공개 코드 동작 재현 범위 | 재구현에는 값 수준 변형만 둠(lr, gate lr, label, 평가 N, curriculum 방향, 평가 prompt, scaling). 구조 결함(CNN router BatchNorm, worker별 curriculum 카운터, 저장 필터, dropout 켬)은 재현하지 않음 | `[결정]`: 기존 fork baseline(6c7ebac)과 결과 보관 파일이 공개 코드 동작의 측정 기준 `[SPEC §0.7]` | 없음 | M14 |
+| D27 | 데이터셋을 어떻게 고르는가 | 설정 키를 더하지 않는다. 기존 닫힌 키 `prompt.template_path`로 고른다: `prompt/movie.txt` → MovieLens, `prompt/game.txt` → Steam, `prompt/artist.txt` → LastFM. 선택지를 셋으로 넓히고 `Config.validate`가 `prompt.template_path`–`sasrec.source_sha256`, `prompt.template_path`–`data.title_mode` 짝을 검사한다 | `[결정]`. 논문·코드에 선택자가 없다 (`U main.py:142-147`는 `data_dir` 문자열로 padding만 나눈다). 모든 키가 필수이고 코드 기본값이 없다 (`R ilora/config.py _build_section`, 4.6.2). 키 87개를 그대로 두면 `config_hash`와 `config.yaml`이 같아 54e5ae0 실행 폴더의 재개·평가가 그대로 된다 (`R ilora/config.py config_hash`, `R ilora/commands.py _reopen_for_resume`, `R ilora/train.py load_checkpoint`). 버린 대안: 새 키 `data.dataset`(기본 movielens): 없는 키를 채우는 예외와 `config_to_dict`에서 빼는 예외 둘이 필요하고, `test_m0_sections.py:49,:57-58`, `test_m14_profiles.py:21,:242`, KEY_TABLE, SCALAR_CHOICES, `paper_spec.yaml`, 3.1, 18.6.2를 고쳐야 한다. `sasrec.source_path`로 고르기: 닫힌 값이 아니다 | 없음 | M0, M1 |
+| D28 | 데이터셋 값의 자리, 아이템 id 상한 전달 | 값은 새 모듈 `ilora/datasets.py`의 frozen `DatasetSpec`에만 둔다. MovieLens 모듈 상수는 같은 이름의 별칭으로 남는다. `Sample`에 필드 `num_items`(기본 1682, compare·repr 제외)를 더해 M2 후보, M4 prompt, M5 padding이 표본에서 id 상한을 읽는다. 입력 해시 표는 `run.py`에 둔다(MovieLens는 `EXPECTED_INPUTS` 그대로, Steam·LastFM은 표 2개 추가) | `[결정]`. M0가 입력 해시의 소유자다 (3.1 경로와 해시). 호출 자리에서 빠뜨릴 수 없게 데이터에 붙인다. 버린 대안: 호출마다 `num_items` 인자: 시험·코드 호출 30여 곳을 고치거나 기본값을 두게 되고, 기본값을 빠뜨리면 Steam 표본 일부가 1682개 풀에서 조용히 뽑힌다 (이력·정답이 모두 < 1682인 행, seed와 무관). `InitVar`: 상한을 후보 쪽에서 읽을 수 없다 | 없음 | M0–M5, M11, M12, M15 |
+| D29 | Steam·LastFM의 최대 lr | Steam 1e-4, LastFM 2e-4 | `[논문 App E p.17]`. 논문-코드 충돌: `U train_steam.sh:19` 5e-4, `U train_lastfm.sh:19` 7e-4 (`L train_steam.sh:17`, `L train_lastfm.sh:17` 같음). 0.1대로 논문을 따른다 (D5와 같다). 버린 대안: 스크립트 값을 주 설정으로: 0.1 위반. 세 데이터셋 1e-4 (`U main.py:85` 기본값): 논문이 LastFM을 2e-4로 적는다 | `steam_variant_released_lr` 5e-4 / 5e-6 / 5e-6, `lastfm_variant_released_lr` 7e-4 / 7e-6 / 7e-6 | M10, M14 |
+| D30 | warmup 시작, lr 최솟값, warmup 길이 | 시작값 = 최대 lr / 100 (Steam 1e-6, LastFM 2e-6). 최솟값 = 시작값. w = T // 20 (295, 93) | 시작값 `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`. 최솟값 규칙 `[코드]` `U train_steam.sh:18,20`, `U train_lastfm.sh:18,20`, `U train_movielens.sh:18,20` (스크립트마다 최솟값 = 시작값 = lr/100). LastFM 값 2e-6은 그 규칙을 논문 최대값에 적용한 `[결정]`. w `[코드]` `U model/model_interface.py:248`. 버린 대안: LastFM 최솟값 1e-6 (`U main.py:90` 기본값): 세 데이터셋의 비례가 깨진다. 차이는 마지막 몇 % step에만 있다 | D29 변형과 함께 | M10, M14 |
+| D31 | micro-batch × accumulation | Steam 4 × 32, LastFM 8 × 16 (곱 128) | 값 `[코드]` `U train_steam.sh:5-6`, `U train_lastfm.sh:5-6` (`L train_steam.sh:3-4`, 코드 계보 일치). 곱 128 `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`, MovieLens 값과 같은 처리. 버린 대안: Steam 8 × 16: 최장 micro-batch 토큰 B·L이 MovieLens의 1.41배(3,776 대 2,672, 측정)다. 4 × 32는 0.71배 | 없음. 메모리 측정 뒤 필요하면 사용자 판단으로 변경 (TBD) | M10, M14 |
+| D32 | 평가 batch 크기 | Steam 4, LastFM 8 | `[코드]` `U test_steam.sh:5`, `U test_lastfm.sh:5`. batch 무관성은 측정 항목 (15.6.10, DS7 둘째 실행의 `batch_invariance.json`, 23.6). 버린 대안: Steam 8: 평가 시간이 줄지만 값이 코드에 있으면 코드를 따른다 (0.1) | 없음 | M11, M14 |
+| D33 | Steam 데이터 판과 validation 파일 | 작업 트리 파일을 sha256으로 고정한다: `train_data.df`, `Test_data.df`, `id2name.txt`(= `U`)와 `Val_data.df`(`F babe9ec`가 추가, `U`에 없음) | `[LLaRA §5.1.1 p.7]` 8:1:1, `U data/steam_data.py:59-60`, `U data/data_interface.py:133` (validation 파일 필수인데 `U`에 없다). 판: `L README.md:11` 2024.5의 "last interacted item 반복 제거" 뒤 파일임을 내용으로 확인 (측정: 정답이 이력 마지막과 같은 행 0, `multi/datasets/s2_report.json`). 고정 방식 `[결정]`. `Val_data.df`의 출처 주장은 `F babe9ec` 메시지뿐이다(23.10 O2). `U data/ref/steam/test.ipynb`(blob `705a4b61`)의 출력은 구판 프레임(1행 `[3448, 855, 2710, 6, 2694, …]`, 다음 2694, `len_seq` 5: 구판 blob `7d5c1a9c`와 같은 행, 구판의 `len_seq ≥ 3` 표본은 1,192개)을 보이고, 현재 `U` blob `44f39d4f`의 같은 행은 `len_seq` 4다: 논문 Steam 행이 어느 판으로 돌았는지는 정하지 못한다(23.10 O3). 버린 대안: 자체 재분할: 논문과 비교할 수 없다. 구판 blob `7d5c1a9c`: 마지막 이력 반복 결함이 있다 (test 1,194행 중 567행, 측정 `multi/settings/lineage_check.py`). validation 없이 평가: D11 위반 | 없음 | M1, M14 |
+| D34 | LastFM 음성 후보 | D10 규칙 그대로: 음성 19개 + 정답을 M2 `draw_candidates`로 | `[논문 App B p.16]` `[LLaRA §5.1.3 p.7]`, `[코드]` `L data/lastfm_data.py:44-46`. 논문-코드 충돌: `U data/lastfm_data.py:43-46`은 음성 1개만 돌려주고 정답이 없다 (실행 확인 `multi/datasets/s7_run_u.py`). 버린 대안: `U` 동작 재현: HR@1이 구조적으로 0인 결함 (D26) | 없음 | M2 |
+| D35 | 난수 key에 데이터셋 이름을 넣는가 | 넣지 않는다. 후보·템플릿·학습 순서 key는 그대로다 | `[결정]`: 실행 하나는 데이터셋 하나만 쓴다. key를 바꾸면 MovieLens golden이 깨진다 (6.6.5, 23.7). 버린 대안: 데이터셋 항 추가: MovieLens 후보가 달라진다 | 없음 | M2, M4 |
+| D36 | SASRec checkpoint | Steam `rec_model/steam.pt`, LastFM `rec_model/lastfm.pt` | `[코드]` `U train_steam.sh:14`, `U test_steam.sh:14`, `U train_lastfm.sh:14`, `U test_lastfm.sh:14`, `L train_steam.sh:12` (같은 blob, 코드 계보 일치). 두 파일의 구조는 MovieLens와 같고 item 수만 다르다 (측정 `multi/sasrec_prompts/check_ckpts_arch.py`). 버린 대안: `rec_model/SASRec_steam.pt` (`U main.py:110` 기본값): 스크립트가 쓰지 않고 22개 텐서가 모두 다르다 (측정) | 없음 | M3, M14 |
+| D37 | 템플릿 | Steam `prompt/game.txt`, LastFM `prompt/artist.txt` 각 3줄 그대로(strip). 선택 규칙은 D15. `prompt/artist.txt:2`의 "10 music artist names"는 20 후보와 다르지만 그대로 둔다 | `[코드]` `U prompt/game.txt:1-3`, `U prompt/artist.txt:1-3`, `U data/data_interface.py:182-190`. 무작위 선택 `[LLaRA §5.1.2 p.7]`. "10"은 `U`·`L` 같은 문구다 (`L prompt/artist.txt:2`). 버린 대안: "20"으로 고치기: 코드 계보 밖의 입력 변경이다. 필요하면 변형으로 추가한다 | 없음 | M4 |
+| D38 | Steam·LastFM 제목 규칙과 인코딩 | 줄을 `::`로 나눠 `fields[1].strip()` (`code`). 파일은 UTF-8로 명시해 읽는다. `data.title_mode`는 `code`만 허용한다. 둘째 `::`는 등록된 id만 허용(Steam 354). 결함은 고치지 않고 `candidate_flags`로 표시한다 | 규칙 `[코드]` `U data/steam_data.py:68-75`, `U data/lastfm_data.py:60-67`. 유지 `[결정]`: D20과 같은 이유 (`[논문 p.6 §4]`). UTF-8 `[결정]`: `U`는 기본 인코딩이라 로케일에 의존하고 cp949에서 실패한다 (측정 `multi/datasets/s4_titles.py`). 파일은 UTF-8로 전부 디코드된다. 버린 대안: `fixed` 변형 제공: MovieLens 규칙(연도·관사)이 해당 없다. 요청이 있으면 최소 수정 목록은 23.2 표에 있다. ISO-8859-1: CJK·키릴 제목이 깨진다 | 없음 | M1, M2, M11 |
+| D39 | 대괄호 제목 | MovieLens 규칙은 그대로 둔다 (`[`, `]` 금지). Steam·LastFM은 슬롯·특수 토큰 문자열만 금지한다: `[HistoryHere]`, `[CansHere]`, `[HistoryEmb]`, `[CansEmb]`, `[PH]`, `[ItemEmb]`, `[PAD]`, `<s>`, `</s>`, `<unk>` | `[결정]`: 실제 제목 7개에 대괄호가 있다 (23.2). 슬롯 문자열은 없고 그 제목만으로 만든 prompt가 `R ilora/batching.py check_token_counts`를 통과한다 (측정 `multi/sasrec_prompts/extra_checks.py`). 버린 대안: 제목 고치기: D38 위반. 세 데이터셋 규칙을 좁히기: `tests/test_m4_prompts.py::test_check_catalog_titles`가 바뀐다 | 없음 | M4, M5 |
+| D40 | Steam 사용자 (D14 확장) | 블록 규칙(직전 창을 이으면 같은 블록)은 그대로다. 첫 창만 데이터셋별: Steam은 빈 이력으로 시작하지 않아도 되고 창 길이는 min(h0 + position, 10)이어야 한다. 블록 9,550, 표본 있는 사용자 9,542, validation·test offset 9,550·10,744. LastFM은 MovieLens와 같은 모양이다 | `[결정]`: 파일에 사용자 열이 없다. 블록 + val + test = `[LLaRA Table 1 p.7]` 11,938 (8:1:1 `[LLaRA §5.1.1 p.7]`, 측정 `multi/datasets/s3b_blocks_more.py`, 재확인 `multi/verify/check_numbers.py`). 버린 대안: 한 행 = 한 사용자: smoke와 D25의 user 단위 변형이 뜻을 잃는다. 빈 시작 규칙 유지: Steam 전부 거부 (`R ilora/data.py assign_users`) | 없음 | M1 |
+| D41 | 평가 N, 보조 프로토콜, 표 D (D17 확장) | 평가 N = 필터 뒤 split 전체 (drop_last 없음). 보조 프로토콜은 앞 ⌊N/b⌋·b 행 (D17 그대로, 23.2 표). 표 D의 LLaRA 행은 정답/전체: Steam (1186, 1183, 587), LastFM (122, 122, 55). Steam은 N = 1184의 해 (1184, 1181, 586)도 있어 N = 1186을 근거와 함께 고르고 표 D 주석에 둘 다 적는다 (23.2). iLoRA 행은 정수해가 없거나(Steam) N을 식별할 수 없어(LastFM) 개수를 적지 않고 그 사실을 문구로 적는다(`counts_text`). 우리 쪽 대조 값: LLaRA 행은 MovieLens와 같이 E1 전체 프로토콜(`valid_ratio`, `combined_metric`, N = 1,186 / 122), iLoRA 행은 같은 프로토콜을 식별할 수 없어 없음(우리 값은 표 A·C에 있다) | 정의 `[코드]` `U model/model_interface.py:180-184, :487-491`, "over all sequences" `[논문 p.6, App B p.16]`, `[LLaRA §5.1.3 p.7]`. 역산 `[결정]` (18.6.7과 같은 방법). N = 1186 선택 `[코드]` `L data/data_interface.py:142-147`(test loader에 drop_last 없음), `L data/data_interface.py:132` drop_last는 train만. 대조 값 선택 `[결정]`: 같은 프로토콜의 값끼리만 짝짓는다 (18.6.7, `R tools/compare_runs.py PAPER_REFERENCE`). 버린 대안: `drop_last` 축소 N만 보고: D17과 다르다. iLoRA 행에 임의의 N을 골라 대조: 식별되지 않은 프로토콜을 사실처럼 적게 된다 | 보조 프로토콜 `drop_last_bs4/8` | M11, M14 |
+| D42 | `len_seq ≥ 3` 필터 | 유지 | `[코드]` `U data/movielens_data.py:79`, `U data/steam_data.py:81`, `U data/lastfm_data.py:71`. 논문 언급 없음. 버린 대안: 필터 제거: 코드 계보와 다르고 표본 수가 달라진다 | 없음 | M1 |
+| D43 | 프로파일과 RUNBOOK의 자리 | 프로파일은 `rebuild/configs/datasets/<dataset>_<profile>.yaml`(이름이 전역 유일), 실행 문서는 새 파일 `rebuild/RUNBOOK_datasets.md` | `[결정]`: 폴더 이름 접두어 규칙 `latest <프로파일>` (`R RUNBOOK.md R0`, 접두어 뒤 숫자), `test_m0_sections.py:97-98`, `test_m14_profiles.py:207-208`이 top-level `configs/*.yaml`을, `test_m14_runbook.py`가 `RUNBOOK.md`를 고정한다. `extends: ../paper_spec.yaml` 동작 (`R ilora/config.py load_raw`). 버린 대안: top-level에 두기: 시험의 프로파일 목록 수정. `configs/steam/paper_spec.yaml`: `latest paper_spec`이 애매해진다 | 없음 | M14 |
+| D44 | 데이터셋별 필수 실험 | 필수: E2(iLoRA), E2 재평가, E1(K = 1), 비교표. 선택: E3, export·군집·E4, `variant_released_lr` (GPU 시간이 크므로 사용자 판단, 23.9) | `[결정]`: 논문 표 1의 비교는 iLoRA와 LLaRA 기준선이다 `[논문 p.7 Table 1]`. E3·E4는 MovieLens 연구의 후속 질문이다 (18.6.1). 버린 대안: 전 데이터셋 E1–E4 전부: Steam 학습 한 번이 약 17–19시간 (추정, 23.9) | 없음 | M14 |
+| D45 | Steam 단계별 재현과 통과 규칙 | S0(SASRec 단독) → S1(학습 없는 Llama-2) → S2(text-only LoRA, 선택) → S3(LLaRA, K = 1) → S4(K = 2) → S5(iLoRA, K = 4) 순서로 하나씩 만들고 돌린다. 앞 단계가 통과해야 다음 단계를 시작한다. 통과 = 논문 값이 우리 test 결과의 Wilson 95% 구간 안. S1만 ValidRatio < 0.5이고 정답/전체 < 0.05 | `[결정]` (2026-11-16 사용자·지도교수 결정: 가장 쉬운 것부터 만들고, 결과가 비슷하면 다음으로). 기준값 `[LLaRA Table 2 p.8]`, `[논문 p.7 Table 1, p.9 §4.3.2]` (24.2). `[SPEC §0.5]`의 MovieLens 한정은 이 결정으로 Steam으로 바뀐다 | 없음 | 24장 |
+| D46 | 학습 없는 LLM 평가 (S1) | `zeroshot` 명령: K = 1, routing none, text-only prompt. checkpoint 없이 seed로 만든 모델을 평가하고, 모든 `lora_B`가 0인지 확인한다. validation과 test를 모두 평가한다 | `[결정]`: Llama2 행은 조정하지 않은 "vanilla LLM"이다 `[LLaRA §5.2.2 (c) p.8]`. B = 0이면 LoRA 기여가 0이다 (식 3, 12.8 #6). hybrid prompt는 학습 안 된 projector 출력을 넣게 되므로 쓰지 않는다. D11의 test 제한은 checkpoint를 test로 고르는 것을 막는 규칙이고, 여기에는 고를 것이 없다 | 없음 | M11, M0 |
+| D47 | SASRec 단독 점수 (S0) | 평가 후보 20개를 공개 SASRec의 출력층 `s_fc(z)`로 순위 매기고, 정답이 단독 1위면 맞힌 것으로 센다. z는 변환한 고정 encoder, `s_fc`는 sha256이 고정된 공개 pickle에서 허용 목록 unpickler로 읽는다 | 전통 모델은 "select the candidate item with the highest probability" `[LLaRA §5.1.3 p.7]`. 출력층 `[코드]` `U recommender/A_SASRec_final_bce_llm.py:170, :184` | 없음 | 도구 |
 
 ### 20.1 D8 scaling을 16으로 정한 이유
 - 논문은 표준 LoRA에 대해서만 h' = Wh + (α/r)BAh를 쓴다 `[논문 p.3 식 3]`. iLoRA는 B, A를 K개의 "up- and down-projection pairs for the k-th expert"(rank r* = r/K)로 나누고 `[논문 p.5 식 9]` ΔW(i<n) = Σ ω_k B_k A_k로 합친다 `[논문 p.6 식 12]`. 결합된 순전파의 scaling은 쓰지 않는다.
@@ -5046,12 +5086,17 @@ def verify_live_encoder(artifacts: ClusterArtifacts, encoder: SASRecEncoder, sam
 | 2026-11-06 | 설계 동기화(구현 반영): 구현·검토에서 정한 내용을 장 본문에 반영. 제안 수정 289건을 모두 적용(건너뜀 0): 머리 상태, 0.4, 3장(모듈 표, 3.1 계약, 3.2), 4–19장(본문과 완료 기준 문구. 기준 번호·절 제목은 그대로). 이어서 0.2에 `R` 출처 표기, 모듈 상태를 `테스트 통과(로컬)`로 바꾸고 22장 구현 기록을 새로 둠. 1·2·20장은 바꾸지 않음. VESSL 측정값은 TBD 그대로. 코드가 설계와 다를 수 있는 남은 질문은 설계-코드 대조 점검에서 확인 |
 | 2026-11-06 | 설계-코드 대조 점검: 동기화로 바뀐 문단을 코드와 대조. 문서를 코드에 맞춤: 0.2(`R` 표기의 경로만·절 이름 꼴), 3.1 실행 폴더(R4의 `pip_freeze.txt`, smoke 단계 폴더 이름, `val_metrics.incomplete-<UTC>.json`에는 `-<n>` 없음), 4.6.3(`compare_inputs`는 `start_meta`가 씀), 4.6.6(`run.log` 둘째·셋째 줄), 15.6.1(M10 호출의 `ckpt_meta`), 15.6.11·16.6.5(`cluster_live_check`는 cluster_hard 밖에서 null), 17.6.9(M0-6·M8-10 행에 이미 기준 번호를 붙인 시험 추가, M9-5·M10-7 확인 문구), 18.6.9(경로 변수 = `ILORA_*` 기록값). 기준 번호·절 제목·표 열 수는 그대로. 코드에 남은 것(설계는 바꾸지 않음): `tools/compare_runs.py` `LIMITATIONS` 6번 문구가 아직 'D24 partial accumulation'(18.6.10 #6과 다름), `_Trainer.after_save`가 남은 `val_metrics.json`을 옮길 때 이름이 겹쳐도 번호를 붙이지 않음, CPU torch thread 수를 `meta.json`·`metrics.json`에 적지 않음(15.6.10) |
 | 2026-11-06 | 대조 점검이 남긴 코드 3건 수정: `tools/compare_runs.py` `LIMITATIONS` 6번을 "no max_steps truncation D24"로 바꿈(18.6.10 #6과 같게), `_Trainer.after_save`가 남은 `val_metrics.json`을 옮길 때 이름이 겹치면 `-<n>`을 붙임(3.1, 14.6.10, `R ilora/train.py _keep_stale_val_metrics`), torch CPU thread 수를 `meta.json` 환경 블록과 `metrics.json` meta의 `torch_num_threads`에 적음(4.6.3, 15.6.9, 15.6.10). 회귀 시험 추가(M10-8 `::test_stale_val_metrics_kept_with_counter`, M14-7 `::test_limitation_e1_names_only_max_steps_for_d24`, M0-3·M11-10에 확인 추가). 0.2에 작업 공간 측정 스크립트 인용의 뜻을 적음. 17.6.9 M10-8 행에 이미 기준 번호를 붙인 시험 3개를 적음. 최종 로컬 확인: 전체 시험 `745 passed, 37 skipped in 1039.78s (0:17:19)`(skip 37개 모두 `VESSL_REQUIRED`), CPU smoke `runs/rebuild/smoke_cpu_20261106T142722Z` 통과(검사 84개: 통과 78, 실패 0, 기록 6). 직전 smoke `smoke_cpu_20261106T085719Z`와 `records.jsonl` 11개가 같은 byte, `representations.npz` 배열이 bit 단위로 같음(meta의 checkpoint 경로만 다름), 학습 CSV는 시간 열만 다름 |
+| 2026-11-09 | 다중 데이터셋 확장 설계(Steam, LastFM): 23장 신설(이 시점은 설계뿐), 결정 D27–D44(20장), 구현 단계 계획 s01–s10. 코드·프로파일 변경 없음(이 문서만). 두 독립 검토(근거, 공학)의 지적을 반영: `lastfm_smoke_cpu`·`steam_smoke_gpu_100`의 smoke 값(23.6), 설정 교차 검사의 import 시점 표(23.4), Steam LLaRA 역산의 두 정수해(D41), 실행 순서(DS1 뒤 DS2)와 DS7의 batch 무관성 실행(23.6), 데이터셋별 bf16 대안, 표 D의 개수 없는 행과 우리 쪽 대조 값(D41), `compat_check.py` 재개·export 확장과 `compare_regress.py`(23.7 (c), (f), 지금 코드에서 통과). 환산의 기준인 VESSL 측정값: smoke 2단계 `runs/rebuild/smoke_gpu_100_20261108T165512Z` (commit 54e5ae0) G1 학습 992.18 s / 1,806 micro-batch(1.82 micro-batch/s), `step_max_mem_gib` 42.60 (23.9, 실행 폴더는 VESSL). 로컬 기준선은 `745 passed, 37 skipped`(2026-11-06). 23장 구현·시험의 결과와 Steam·LastFM의 모든 측정값은 아직 없음(TBD) |
+| 2026-11-09 | 다중 데이터셋 확장 구현과 로컬 확인 (23장, 결정 D27–D44, 구현 단계 s01–s08, 이 문서 동기화 s09): `ilora/datasets.py`(M0, `DatasetSpec`), 23.5의 모듈별 변경, `configs/datasets/` 18개, `tools/convert_sasrec.py --dataset`, `tools/compare_runs.py`의 데이터셋별 표 D·한계·정의, `RUNBOOK_datasets.md`, 새 시험(23.8). 로컬 시험(Windows CPU, 이 날, 출력 로그는 작업 공간 `multi/stage_out/<단계>/`): 전체 시험 `745 passed, 37 skipped in 662.42s (0:11:02)`(단계 s01 끝), `844 passed, 37 skipped in 2141.47s (0:35:41)`(s02 끝), `935 passed, 37 skipped in 719.81s (0:11:59)`(s03 끝), skip 37개는 모두 `VESSL_REQUIRED`. s04 이후 단계는 계획의 시험 명령만 돌림: s04 `155 passed`, s05 `74 passed`, s06 `22 passed`, s07 `40 passed`, s08 `47 passed, 24 skipped`(skip 24개는 `VESSL_REQUIRED`). 전체 수집 1,158개(`--collect-only`) = 이전 782개(745 + 37) + 새 376개 (test_ds_spec 53, test_ds_profiles 60, test_ds_data 91, test_ds_candidates 16, test_ds_prompts 45, test_ds_convert 27, test_ds_smoke_cpu 16, test_ds_compare 22, test_ds_runbook 22, vessl/test_ds_run_outputs 24). 모든 단계를 마친 코드의 전체 시험 결과는 TBD(단계 s10). MovieLens 불변 증명(23.7, 같은 날 같은 기계): (a) golden diff 비어 있음(s01, s02 끝), (b) `regress_check.py` `RESULT: PASS`(s01 끝 코드, 새 CPU smoke `smoke cpu passed: 84 checks, 0 failed, 6 recorded`, `torch_num_threads` 14 동일), (c) `compat_check.py` `RESULT PASS`(s01 끝 코드), (d) 위 전체 시험, (e) git diff 비어 있음(s01, s02 끝), (f) `compare_regress.py` `RESULT PASS`(s07 끝 코드, 네 출력 파일 같음). 최종 코드에서의 (a)–(f) 재실행은 TBD(단계 s10). SASRec 변환: state digest가 23.2와 같고 CPU 기준 대조 bitwise 일치, 기준 행 153,418·48,116 (`multi/stage_out/s05_sasrec_convert/acceptance.log`, 출력은 git 밖 `runs/rebuild/assets/sasrec_{steam,lastfm}/`). CPU smoke `steam_smoke_cpu`·`lastfm_smoke_cpu` S0–S8 통과, 검사 84개(통과 78, 실패 0, 기록 6), 실행 106.3 s·69.5 s (`multi/stage_out/s06_smoke_cpu/trial_steam2.log`, `trial_lastfm2.log`), `tests/test_ds_smoke_cpu.py` 통과. VESSL에서 돌린 것 없음: 23.8 완료 기준 16–20과 Steam·LastFM의 학습·평가·시간·메모리·지표는 모두 TBD |
+| 2026-11-16 | Steam 단계별 재현 시작 (24장, D45–D47): 실험 대상을 Steam으로 바꾸고 쉬운 단계부터 하나씩 만들고 확인하기로 함. S0 측정(로컬 CPU, `tools/sasrec_baseline.py`): test 498/1186 = 0.4199, validation 485/1184 = 0.4096, 논문 0.4010이 95% 구간 안. S1 구현: `zeroshot` 명령(`R ilora/evaluate.py run_zero_shot_command`), 프로파일 `configs/steam_ladder/` 4개, 실행 문서 `STEAM_LADDER.md`, 시험 `tests/test_ladder.py`. 로컬 전체 시험(Windows CPU) `1108 passed, 61 skipped in 2729.42s (0:45:29)`, skip 61개는 모두 `VESSL_REQUIRED`. S1 이후의 VESSL 값은 TBD |
 
 ---
 
 ## 22. 구현 기록
 
 구현 중 정한 세부 사항 중 장 본문에 넣지 않은 것. 코드가 기준이다.
+
+다중 데이터셋 확장(23장, 2026-11-09)의 구현 세부 사항은 22.17에 있다.
 
 ### 22.1 M0 설정과 실행 관리
 - `derive_seed`는 bool key와 `|`가 든 문자열 key를 거부한다. 서로 다른 key 목록이 같은 문자열로 이어져 같은 seed가 되는 일을 막음 `R ilora/seeding.py derive_seed`
@@ -5179,7 +5224,7 @@ def verify_live_encoder(artifacts: ClusterArtifacts, encoder: SASRecEncoder, sam
 - 실패한 단계도 `steps/<id>_<이름>_*` 중 가장 늦은 폴더를 찾아 보고에 적음 `R ilora/smoke.py _SmokeRun._find_folder`
 - CPU fp32 S1의 `batch_invariance.json`은 토큰 10/10이지만 batch 8과 1의 gate 값이 끝자리에서 달라 records·gates 일치는 0/10(13.6.3과 같은 GEMM 행 수 의존). S1 판정은 토큰만이고, one-hot(S5)·K = 1(S7)은 기록 일치도 10/10 `R ilora/smoke.py _batch_invariance`
 - 로컬 CPU smoke 보고는 검사 84개(판정 78, 기록만 6: S1·S4·S5·S7 측정값, S5·S7 batch 무관성)이고 `main.py smoke`(smoke_cpu)는 약 2분 `R ilora/smoke.py run_smoke`
-- `tests/conftest.py`와 `tests/vessl/conftest.py`는 모듈 이름이 같아 시험 모듈이 `SKIP_*` 상수를 import할 수 없음: 문서화된 skip은 conftest fixture 안에서만 냄 `R tests/conftest.py`
+- `tests/conftest.py`와 `tests/vessl/conftest.py`는 모듈 이름이 같아 시험 모듈의 `SKIP_*` 상수 import는 수집 순서(그때 `sys.modules`의 `conftest`)에 달림: 문서화된 skip은 conftest fixture 안에서 냄 (예외: `tests/test_ds_smoke_cpu.py`, 22.17) `R tests/conftest.py`
 - conftest fixture는 모듈 코드를 본문 안에서 import하므로 그 모듈이 없어도 수집은 되고, 쓰는 시험은 skip이 아니라 오류가 됨 `R tests/conftest.py`
 
 ### 22.15 M14 실험 구성
@@ -5198,3 +5243,490 @@ def verify_live_encoder(artifacts: ClusterArtifacts, encoder: SASRecEncoder, sam
 - `test_fit_deterministic_one_thread`와 `test_full_artifacts_for_smoke`는 66k 정확 silhouette(약 1분)을 monkeypatch 대역으로 바꿈. 정확값은 `smoke_cluster_dir`와 M15-11이 계산 `R tests/test_m15_cluster.py stub_silhouette`
 - `smoke_cluster_dir`는 session 공유라 산출물을 바꾸는 시험은 `copy_artifacts`로 복사본을 씀 `R tests/test_m15_cluster.py copy_artifacts`
 - 로컬 M15-11에서 실제 SASRec z로 `cluster` 명령 한 번은 약 70–76초이고 그중 정확 silhouette이 약 61–65초, KMeans fit은 약 1.5–1.7초(군집 크기·silhouette 값은 TBD로 둠) `R tests/test_m15_cluster.py test_cluster_command_real_sasrec`
+
+### 22.17 다중 데이터셋 확장 (23장)
+2026-11-09 구현(단계 s01–s08)에서 정한 세부 사항이다. 값의 근거와 결정은 23장에 있다.
+
+- `ilora/datasets.py`에 `SPLIT_FILES`(세 split 파일 이름. `data.py`가 가져다 쓰고 `data.SPLIT_FILES`로 그대로 보임)와 `DatasetError(ValueError)`(`for_template`의 모르는 경로)도 있음. mapping 필드는 일반 dict라 `DatasetSpec`이 frozen이어도 내용은 바뀔 수 있고 `hash(spec)`는 `TypeError`, `user_offset`은 호출마다 새 dict `R ilora/datasets.py DatasetSpec`
+- `Config.validate`는 `DatasetError`를 `ConfigError`로 바꿈(직접 만든 `Config`도 이름 있는 오류). 설정 검사가 읽는 입력 표는 import 시점에 묶은 `sections._INPUT_TABLES`(23.4) `R ilora/sections.py Config.validate`
+- M1: `Sample`은 `num_items`가 1 이상 Python int가 아니면 `DataError`. `select_smoke`도 keyword `spec`(범위 오류 문구가 데이터셋의 행 수를 읽음). `read_raw_titles`는 필드 2개 미만 줄과 UTF-8이 아닌 파일도 `DataError`. 공개 상수 `ID2NAME_ENCODING`, `ID2NAME_SEPARATOR`. train 수 오류 문구는 블록 수와 사용자 수가 다를 때(Steam)만 둘을 함께 적고 MovieLens 문구는 그대로. `title_report`는 `u.item`에만 `R ilora/data.py load_dataset`, `R ilora/data.py read_raw_titles`
+- 쓰이지 않게 된 MovieLens 이름: `candidates.py`·`prompts.py`의 `NUM_ITEMS` import, `sasrec.py`·`records.py`·`cluster.py`의 `PAD_ID` import, `cluster.py`의 `EXPECTED_SAMPLES` import는 지움. 상수 `cluster.DATA_FILES`, `evaluate.FULL_SPLIT_SIZE`, `prompts.TEMPLATE_FILE`, `batching.PAD_ITEM`은 23.4대로 남겼고 동작에는 더 쓰이지 않음
+- 오류 문구: `load_templates`의 해시 불일치는 MovieLens면 `run.EXPECTED_INPUTS`(byte 그대로), 그 밖은 `run.expected_inputs('<이름>')`를 적음 `R ilora/prompts.py load_templates`. `_verified_paths`의 표 없음 문구는 모든 데이터셋에서 `run.EXPECTED_INPUTS`(표가 불완전할 때만 닿음) `R ilora/data.py _verified_paths`. `candidates_for`의 후보 수 오류는 `(§3.1 cand_ids [B, 20], D10)`만 적음(앞부분 `num_candidates must be 20`은 그대로, `tests/test_m2_candidates.py`가 읽음) `R ilora/candidates.py candidates_for`
+- 프로파일: `<d>_cluster_hard` 2개는 MovieLens `cluster_hard`처럼 `--set cluster.artifact_dir` 없이는 `ConfigError`, 나머지 16개는 덮어쓰기 없이 읽힘 `R tests/test_ds_profiles.py test_profile_loads_and_round_trips`. `steam_smoke_cpu`·`steam_overfit_gpu`는 `smoke_cpu.yaml`·`overfit_gpu.yaml`과 같은 키라 부모와 같은 값 `train.micro_batch_size` 4도 적음 `R tests/test_ds_profiles.py SAME_AS_PARENT`. `configs/datasets/`에 다른 파일을 두면 `test_files_format_and_unique_stems`가 실패
+- 변환 도구: `dataset_pins(dataset)`은 호출마다 표를 만듦(MovieLens 행은 모듈 상수를 호출 시점에 읽어 시험의 monkeypatch가 그대로 먹고, Steam·LastFM 행은 `ilora.datasets.SPECS`와 23.2의 blob·sha256). 모듈 상수 `DROPPED_KEYS`는 유지. `manifest.json` 키는 MovieLens와 같음(새 `dataset` 키 없음, `pickle.path`와 데이터 키로 구분) `R tools/convert_sasrec.py dataset_pins`. 변환 결과(2026-11-09 이 기계, `runs/rebuild/assets/sasrec_{steam,lastfm}/manifest.json`): 구조는 MovieLens pickle과 같고 `item_num`만 3,581·4,606, state 텐서 20개, 기준 행 153,418·48,116, `self_check`의 padding 있는 행 3,448·5,716
+- 시험: `tests/test_ds_smoke_cpu.py`는 Steam·LastFM 변환본이 없을 때 `SKIP_NO_SASREC`로 skip하려고 모듈 수준 `from conftest import SKIP_NO_SASREC`를 씀(이름이 겹치는 두 conftest 중 `tests/conftest.py`가 먼저 import되는 전체 수집에서 동작, `--collect-only`로 확인. 22.14) `R tests/test_ds_smoke_cpu.py`
+- `tools/compare_runs.py`: `PAPER_REFERENCE`(MovieLens, byte 불변), `PAPER_REFERENCE_STEAM`, `PAPER_REFERENCE_LASTFM`, `COPIED_ROW_TEXT`, `PaperText`·`PAPER_TEXTS`(행, 표 위 문구, 주석, 바꾸는 한계 항목), 정의 줄 `protocol_definition`, `Report.dataset`. 정한 것: 쓸 수 있는 실행이 없는 비교는 MovieLens 문구(모든 칸 NOT_RUN). 쓸 수 있는 실행의 `prompt.template_path`가 없거나 모르는 값이면 `CompareError`. export·군집 실행도 같은 데이터셋이어야 함. `meta.json` `inputs`는 MovieLens가 아닐 때만 `update_meta`로 다시 씀(MovieLens는 `start_meta`가 쓴 표 그대로). Steam 한계 문구는 N = 1186, 논문 Imp.% 칸은 인쇄값과 계산값을 함께 적음(Steam 6.36%·6.36%, LastFM 8.51%·10.91%) `R tools/compare_runs.py run_compare`
+- `RUNBOOK_datasets.md`: DS1에 R2의 세 줄(`git rev-parse HEAD`와 `git status --porcelain`, `--is-shallow-repository`, `cat-file -e`)을 먼저 둠(변환 도구가 전체 이력을 쓰고 commit 기록이 중요함, R2와 같음). DS14에 선택 실행을 포함해 비교표를 다시 만드는 둘째 블록(`ILORA_RUN_<D>_COMPARE_ALL`, R15와 같은 방식). R10의 `ILORA_E2_BEST`는 `ILORA_RUN_<D>_E2_BEST`(epoch 번호, 실행 폴더 아님). 문서 순서는 DS0–DS2 공통, 필수 DS3–DS9를 LastFM·Steam 순서로, 선택 DS10–DS14는 그 뒤 `R RUNBOOK_datasets.md DS14`. `tests/vessl/test_ds_run_outputs.py`의 시험 id는 `<dataset>_<step>`(`dsoutputs`의 `-k` 선택어)이고 `STEP_RUNS`가 단계별 실행 폴더 이름을 고정함(`tests/test_ds_runbook.py`가 읽음). 23.6의 DS8에는 E1 export가 없어 더하지 않음 `R tests/vessl/test_ds_run_outputs.py STEP_RUNS`
+- Steam 실제 파일(시험과 측정으로 확인): train 블록은 길이 1–10의 창으로 시작하고 이후 창은 길이 10 `R tests/test_ds_data.py test_block_shape_follows_the_first_window_rule`. 필터로 빠진 train 8행(`len_seq` 1이 1행, 2가 7행)은 각각 창 하나뿐인 블록이라 블록 9,550에 표본 있는 사용자 9,542 (측정 `multi/stage_out/s09_design_merge/probe_steam_blocks.py`). 23.2의 train 입력 길이 행은 구현 코드로 한 번 전수 재확인함(`multi/stage_out/s04_candidates_prompts/probe3.py`, 상시 시험 아님)
+
+---
+
+## 23. 다중 데이터셋 확장 (Steam, LastFM)
+상태: 구현 완료, 로컬 CPU 확인 2026-11-09 (단계별 시험과 23.7의 불변 확인, 결과는 21장 2026-11-09 구현 행; 모든 단계를 마친 코드의 전체 시험은 TBD), VESSL 실행 전. 구현 순서는 저장소 밖 작업 공간의 `multi/plan.json`(단계 s01–s10)에 있다.
+
+이 장의 `R` 표기는 구현된 코드(`R ilora/datasets.py` 등, 2026-11-09)를 가리킨다. 측정 스크립트 경로(`multi/…`)는 0.2의 `측정:`과 같은 뜻이다(저장소 밖 작업 공간).
+
+### 23.1 목표와 범위
+
+- **목표:** 논문의 세 데이터셋 중 구현에 없는 Steam과 LastFM을 MovieLens와 같은 코드 경로로 학습·평가한다 `[논문 p.6 §4]`. 방법(식 11 gate, MoE-LoRA, projector, curriculum)은 바꾸지 않는다. 데이터셋마다 달라지는 것은 데이터 파일, 아이템 수, 제목 규칙, 템플릿 파일, SASRec checkpoint, lr, micro-batch 구성이다.
+- **범위 안:** 설계, 구현, 로컬 CPU 시험, 데이터셋별 프로파일과 RUNBOOK, 23.8의 완료 기준.
+- **범위 밖:** Llama-2 실물 학습의 로컬 실행 `[SPEC §0.13]`, 공개 코드 결함의 재현(D26), 추가 seed(D2), 논문 App C의 40k sequence gradient 유사도 분석 `[논문 App C p.17]`.
+- **MovieLens 동작은 바꾸지 않는다.** 프로파일 17개의 `config_hash`와 `config.yaml`, 입력 해시, 후보·템플릿·학습 계획, 학습·평가·export 산출물이 이전과 같아야 한다(23.7).
+- **지금 실험(commit 54e5ae0)과의 관계.** 설계와 로컬 구현·시험은 끝났다(2026-11-09). VESSL에는 아래 조건 전에는 올리지 않는다.
+  - VESSL에서 54e5ae0으로 돌고 있는 MovieLens 실행의 결과는 이 장의 구현 뒤에도 MovieLens 결과로 그대로 유효하다. MovieLens를 다시 돌리지 않는다. 근거는 23.7의 증명이다.
+  - 구현 commit은 54e5ae0 실행이 모두 끝난 뒤(또는 사용자가 중단한 뒤)에만 VESSL workspace에 올린다. 실행 중에는 workspace의 코드를 바꾸지 않는다: `meta.json`의 코드 기록이 실제 실행을 대표해야 한다(`R RUNBOOK.md R2`).
+  - 54e5ae0 실행 폴더는 새 코드에서도 읽혀야 한다(재개, `eval`, `export`). 23.7 (c)가 네 경로(설정 로드, 평가, export, 재개 학습)를 돌려 확인한다.
+  - 새 데이터셋 결과와 54e5ae0의 MovieLens 결과는 다른 commit의 결과다(`meta.json` `code.git.commit`). 비교표는 데이터셋 안에서만 만든다(`tools/compare_runs.py`가 데이터셋이 섞이면 거부, 23.5 M14).
+- **SPEC과의 관계:** `[SPEC §0.5]`는 "오늘 실험 범위"를 MovieLens로 적는다. 이 장은 그 범위를 넓히므로 SPEC 소유자의 개정이 필요하다(23.10 O1). DESIGN 1.1·1.2는 이 장에 맞춰 함께 고쳤다.
+
+### 23.2 데이터셋 비교 표
+
+| 항목 | MovieLens | Steam | LastFM | 근거·측정 |
+|---|---|---|---|---|
+| 폴더 | `data/ref/movielens` | `data/ref/steam` | `data/ref/lastfm` | `U train_*.sh:8` |
+| train·val·test 파일 | `train_data.df`, `Val_data.df`, `Test_data.df` | 같음. `Val_data.df`는 `U`에 없고 `F babe9ec`가 추가 (D33) | 같음 | `U data/steam_data.py:57-62` |
+| 제목 파일 | `u.item` | `id2name.txt` | `id2name.txt` | `U data/*_data.py` |
+| 제목 파일 형식 | ISO-8859-1, `\|` 24필드, id = `movie_id` − 1 | UTF-8, `id::title`, id = 줄 번호 0–3580 | UTF-8, `id::title`, id = 줄 번호 0–4605 | `U data/movielens_data.py:71-74`, `U data/steam_data.py:71-74`, `U data/lastfm_data.py:63-66`, 측정 `multi/datasets/s4_titles.py` |
+| `code` 제목 규칙 | `get_mv_title(raw[:-7])` (D20) | `ll[1].strip()` (D38) | `ll[1].strip()` (D38) | 위와 같음 |
+| 행 형식 | seq = (item, rating) 10개, next = (item, rating), train에 `cluster` 열 | seq = int 10개, next = int, 열 `seq,next,len_seq` | seq = int 10개, next = int, 열 `seq,len_seq,next` | 측정 `multi/datasets/s2_frames.py` |
+| 아이템 수 = padding id = SASRec `item_num` | 1,682 | 3,581 | 4,606 | `[LLaRA Table 1 p.7]`, `U main.py:142-147`, 측정 `multi/sasrec_prompts/check_ckpts_arch.py` |
+| train / val / test 행 수 | 68,388 / 94 / 95 | 151,056 / 1,194 / 1,194 | 50,800 / 122 / 122 | 측정 `multi/datasets/s2_frames.py` |
+| 표본 수 (`len_seq ≥ 3`) | 66,126 / 94 / 95 | 151,048 / 1,184 / 1,186 | 47,872 / 122 / 122 | 측정 같음, 공개 로더 실행과 일치 `multi/datasets/s7_run_u.py` |
+| 필터로 빠진 행 | 2,262 / 0 / 0 | 8 / 10 / 8 | 2,928 / 0 / 0 | 측정 `multi/datasets/s6_final.py` |
+| train 블록 / 표본 있는 사용자 | 754 / 754 | 9,550 / 9,542 | 976 / 976 | D14, D40, 측정 `multi/datasets/s3b_blocks_more.py` |
+| 블록 모양 | 빈 이력에서 시작, 창 길이 0, 1, …, 10, 10 | 첫 창 길이 1–10, 이후 창 길이 10 | MovieLens와 같음 | 측정 같음 |
+| sequence 수 = 블록 + val + test 행 | 754 + 94 + 95 = 943 | 9,550 + 1,194 + 1,194 = 11,938 | 976 + 122 + 122 = 1,220 | `[LLaRA Table 1 p.7]` 값과 같음, 측정 같음 |
+| 사용자 ID offset (val / test) | 754 / 848 | 9,550 / 10,744 | 976 / 1,098 | D14 규칙 |
+| 사용된 아이템 / 전체 | 1,540 / 1,682 | 3,568 / 3,581 | 4,606 / 4,606 | 측정 `multi/datasets/s9_misc.py` |
+| 후보 수 (`cans_num`) | 20 | 20 | 20 | `U train_*.sh:9`, `[LLaRA §5.1.3 p.7]`; LastFM 공개 로더는 1개만 돌려줌 (D34) |
+| 음성 풀 크기 (D21) | ≥ 1,671 | ≥ 3,570 | ≥ 4,595 | N − 11 |
+| 템플릿 파일 | `prompt/movie.txt` | `prompt/game.txt` | `prompt/artist.txt` | `U train_*.sh:10` |
+| SASRec checkpoint | `rec_model/movielens.pt` | `rec_model/steam.pt` | `rec_model/lastfm.pt` | `U train_*.sh:14`, D36 |
+| 논문 Table 1 iLoRA (VR / HR@1) | 0.9891 / 0.5275 | 0.9981 / 0.5264 | 1.0000 / 0.5000 | `[논문 p.7 Table 1]` |
+| 논문 Table 1 LLaRA (VR / HR@1) | 0.9684 / 0.4421 | 0.9975 / 0.4949 | 1.0000 / 0.4508 | `[논문 p.7 Table 1]`, `[LLaRA Table 2 p.8]` |
+| iLoRA 행의 정수 역산 | (92, 91, 48) c/v | N = 1184, 1186, 1192, 1194에서 정수해 없음 | (122, 122, 61) 또는 (120, 120, 60), N 식별 불가 | 계산 `multi/settings/backsolve_all.py`, 재확인 `multi/verify/check_numbers.py` |
+| LLaRA 행의 정수 역산 | (95, 92, 42) c/N | (1186, 1183, 587) c/N 채택. N = 1184에는 (1184, 1181, 586) c/N도 있다 (아래 주석) | (122, 122, 55) c/N (= c/v) | 계산 같음, 재확인 `multi/critic/c2_backsolve.py` |
+| 최대 lr (주 설정) | 1e-4 | 1e-4 | 2e-4 | `[논문 App E p.17]`, D5, D29 |
+| warmup 시작 / lr 최솟값 | 1e-6 / 1e-6 | 1e-6 / 1e-6 | 2e-6 / 2e-6 | D6, D30 |
+| 공개 스크립트 lr (최대 / 시작 / 최솟값, 변형만) | 8e-4 / 8e-6 / 8e-6 | 5e-4 / 5e-6 / 5e-6 | 7e-4 / 7e-6 / 7e-6 | `U train_*.sh:18-20`, `L train_*.sh:16-18` |
+| micro-batch × accumulation | 8 × 16 | 4 × 32 | 8 × 16 | `U train_*.sh:5-6`, D31 |
+| 평가 batch | 8 | 4 | 8 | `U test_*.sh:5`, D32 |
+| epoch당 micro-batch (NB, drop_last) | 8,265 (6개 버림) | 37,762 (0개) | 5,984 (0개) | `R ilora/train.py step_counts` 계산 |
+| epoch 끝 창 크기 (D24) | 9 | 2 | 없음 | NB mod A |
+| epoch당 step / 전체 step T | 517 / 2,585 | 1,181 / 5,905 | 374 / 1,870 | 계산 |
+| warmup 길이 w = T // 20 | 129 | 295 | 93 | `U model/model_interface.py:248` |
+| curriculum T_mb = 5·NB | 41,325 | 188,810 | 29,920 | D3 |
+| hybrid micro-batch (epoch별 합, seed 1234) | 846 / 2,550 / 4,076 / 5,766 / 7,436 = 20,674 | 3,781 / 11,484 / 18,910 / 26,406 / 34,093 = 94,674 | 586 / 1,820 / 2,979 / 4,195 / 5,373 = 14,953 | 계산 `multi/verify/check_numbers2.py` (8.6.5 방식) |
+| 공개 코드의 `max_steps` | 2,583 | 5,900 | 1,870 | `U main.py:50` (D24: 절단은 따르지 않음) |
+| 평가 N (val / test, drop_last 없음) | 94 / 95 | 1,184 / 1,186 | 122 / 122 | D17, D41 |
+| 보조 프로토콜 test `drop_last_bs4` / `bs8` | 92 / 88 | 1,184 / 1,184 | 120 / 120 | D17, D41, `R ilora/evaluate.py aux_protocol_metrics` |
+| 제목 모호 표시 (seed 1234, val / test): 부분 문자열, 판정 불가 | 1 / 4, 1 / 2 | 43 / 37, 13 / 5 | 3 / 3, 0 / 0 | 측정 `multi/datasets/s5_flags.py`, 재확인 `multi/verify/check_numbers.py` (6.6.6과 같은 방식) |
+| CombinedMetric 상한 (val, test) | 93/94, 93/95 | 1,171/1,184, 1,181/1,186 | 122/122, 122/122 | N − `target_unscorable` (6.6.6 방식). 결과가 아님 |
+| train 입력 길이 min / p50 / p99 / max (토큰) | 153 / 245 / 291 / 334 | 193 / 288 / 352 / 472 | 149 / 215 / 241 / 259 | 측정 `multi/sasrec_prompts/token_lengths_full.py` (실제 tokenizer, 9.6.3 재현), Steam·LastFM은 구현 코드로 재확인 `multi/stage_out/s04_candidates_prompts/probe3.py` (상시 시험 아님) |
+| 평가 prompt 최대 길이 (val / test) | 290 / 279 | 363 / 392 | 241 / 233 | 측정 같음 (9.6.4 재현) |
+| 구성 최장 prompt / + 응답 / + 생성 64 | 616 / 639 / 680 | 875 / 928 / 939 | 438 / 455 / 502 | 측정 `multi/sasrec_prompts/worst_case.py`, 모두 `batching.max_seq_len` 1024 이하 |
+| 최장 micro-batch 토큰 B·L (epoch 0) | 2,672 | 1,888 | 2,072 | 측정 `multi/sasrec_prompts/token_lengths_full.py` |
+| epoch 패딩 포함 토큰 (비율) | 18.02M (1.00) | 47.44M (2.63) | 11.05M (0.61) | 측정 같음 |
+| 학습 1회 생성 표본 수 (validation 5회 + test 2회) | 660 | 8,292 | 854 | 계산, D11 |
+
+- c/v = 정답/유효, c/N = 정답/전체 (D17). 역산은 18.6.7 표 D와 같은 방법이고 MovieLens 값을 재현한다.
+- iLoRA Steam 행은 N ≤ 1194에서 N ∈ {530, 531, 1026, 1041, 1043, 1045, 1060, 1062, 1064, 1079, 1081}에서만 정수해가 있다. 공개 코드가 만들 수 있는 N(1184, 1186, 1192, 1194; 1192는 구판 test 파일의 표본 수, D33)이 없다. 원인은 정하지 못한다.
+- LLaRA Steam 행은 N = 1186에서 (1186, 1183, 587), N = 1184에서 (1184, 1181, 586)의 두 정수해가 있다(모두 c/N). N = 1186을 채택한다: `L data/data_interface.py:142-147`의 test loader에 `drop_last`가 없고 ValidRatio 분모가 "over all sequences"다 `[LLaRA §5.1.3 p.7]`. N = 1184는 `drop_last`(batch 4·8)로 줄어든 행 수이고 표 D 주석에 함께 적는다(D41).
+- `[논문 p.7 Table 1]`의 Imp.% (LLaRA 대비): LastFM은 8.51%로 인쇄되어 있으나 0.5000 / 0.4508 − 1 = 10.91%다(계산, 다른 칸은 일치). Steam은 6.36%로 인쇄되어 있고 0.5264 / 0.4949 − 1 = 6.36%로 같다(인쇄값 `multi/critic/c2_backsolve.py`). 표 D 주석에 인쇄값과 계산값을 함께 적는다(23.5 M14) `R tools/compare_runs.py PAPER_TEXTS`.
+
+입력 해시와 기대값. MovieLens 값은 `R ilora/run.py EXPECTED_INPUTS`, `R ilora/data.py EXPECTED_FINGERPRINTS`, `configs/paper_spec.yaml`에 이미 있다.
+
+| 대상 | Steam | LastFM |
+|---|---|---|
+| `train_data.df` sha256 | `90f8e2ec827427d271cf0b03db45ed5ac3231840fbd022ac57cfae6061ed5b63` | `7db71a60d3da4c449091fbc254efc9602f81eec6eb9a60534811ccd61974dbc1` |
+| `Val_data.df` sha256 | `84cd6a73ffea7e64e88e0c01357e01ffc7492fac3870dcccb417939c82fc764b` | `92a1ddb65ebdeff999f910b65660eb3d8c7cd85e6a19308d80c429481839f8b3` |
+| `Test_data.df` sha256 | `2766b9faf90e3531a35207c01fbef2f655af97c21a6ba7d18581bbef2bc6ad59` | `cac058a2842b2a3ed4d39ed1fa0a742f5034a23c9851a2ffc157b4845d703570` |
+| `id2name.txt` sha256 (text) | `dada06a1306c36c91fb1ee3f980df7bee894024b3f52d20832ec2340524d7b7b` | `b608bcf14300b1608ccd88f4fe240e6345125201ecdb55157395c19787fe4eaf` |
+| 템플릿 sha256 (text) | `cdc7f7160d5e6beac2c31449540b55525cc069c5aa70277c0ca307a544f4b7b3` | `0b85e0e091281f96460942e177273757a540a7f3b3743b500f53ea37e4288094` |
+| checkpoint blob | `db78403205868f67c8214820ac9dd05c3f44205d` | `4cad4b22cdcbf3e7cc959409af803f5d975a9941` |
+| checkpoint sha256 | `752c0cd11a8646adca10025b5746dfcb8968967a6104546f6f869a3ebf26609b` | `6f94253543e0ca3b0bbd42b4f6b94f2c97c9fdfdd36c3b5ad3f6b576a806dd86` |
+| 변환 state digest (7.6.2) | `d5d13fc0bc0f3c8ebc2f64e4247e9da3b486e6984c931bb8454ebbb17c8b3932` | `6b0d161351901a272fe07ef4c2bf3ccc99e06a487bcaee1c9b88392f59435d85` |
+| frame 지문 train | `d1468b1f36548bdc9c71dca9c918b710695e5efc9052cbe973357d5a10266ee9` | `890287c1d4f8fc1015d2e7ebe2167e8d098b0a1ff56721a3c73afaecf0cc2640` |
+| frame 지문 val | `bc63919adc858273ecde739a6eedab8e48bd4359fb204f5179bd55e389d42b75` | `9d3440714637ebbf2b19ca9a0f8037fe8a391aa587c75adc736d4d84769bf52c` |
+| frame 지문 test | `987376eb6cb7ac1bc6fdf04b7655bbc467c18277e60bcd305b3717cb89784705` | `13d9b892f7cdf28fc25d61458f3fda873015305cc3486870da9ed24b95a4c354` |
+| 후보 직렬화 hash val (6.6.5, seed 1234) | `ba0df0feb1ce97dfac44a5786bf1f0b2674cb2501fcb54f302419c468a4120bb` | `3caad6a1fb669dc2e82b234afa474ddd2ed880002fb20b64e70b94fa298d1294` |
+| 후보 직렬화 hash test | `3dd8399ec36b739bfb25102e32a20569ad5bfdd1eddb87a00ca3c6612985813f` | `0eb6f0af94ea28d6526b8a34f63ff88d94ce8cc5a243a07eb409dac57bc7c2d1` |
+
+- 파일 sha256과 지문·후보 hash는 다시 계산해 위 값과 같음을 확인했다(`multi/verify/check_numbers.py`). 지문 형식(5.6.9의 평점 없는 판): 행마다 `json.dumps([p, [item × 10], len_seq, next], separators=(",", ":"))`, 줄을 `\n`으로 잇고 UTF-8 sha256. 입력 해시 표의 text 표시는 `id2name.txt`와 템플릿만 참이다(CRLF → LF).
+
+제목 결함 기록 (D38, 고치지 않고 기록, 측정 `multi/datasets/s4b_defects.py`, `multi/datasets/s9_misc.py`).
+
+| 결함 | Steam | LastFM |
+|---|---|---|
+| 둘째 `::`로 잘림 | id 354 `Depths of Fear :: Knossos` → `Depths of Fear` (필터 뒤 431회 사용) | 없음 |
+| 빈 제목, 정확 중복 | 없음 | 없음 |
+| `match_norm` 충돌 | 1쌍: 1064 `FORTIFY` / 2201 `Fortify` (seed 1234 val·test 후보에는 함께 안 나옴) | 없음 |
+| HTML 엔티티 | 37개 제목에 `&amp;` (train 이력에서 32,042회 사용) | 없음 |
+| 제어 문자 | 3073 `Starlight Inception™\x99`, U+0099 | 없음 |
+| 대괄호 제목 (D39) | 2224 `[the Sequence]`, 2592 `Corrosion: Cold Winter Waiting [Enhanced Edition]` | 678 `[:SITD:]`, 690 `Nurzery [Rhymes]`, 1016 `[unknown]`, 2985 `Dungeon Elite [**]`, 3568 `Superchic[k]` |
+| 자리 표시 이름 (실제 항목) | 없음 | 1016 `[unknown]`, 3429 `Various Artists` |
+| 한 글자·짧은 이름 | `b` 1653, `Z` 2978 (어느 이력에도 없고 후보 풀에만), `OR` 1801, `iO` 527, `oO` 687, `ШП` 1530 | `3`, `BT`, `Ef`, `L7`, `Lu`, `U2`, `Zu`, `jj`, `嵐` |
+| 부분 문자열 제목 쌍 (`match_norm`) | 164개 제목, 2,497 쌍 | 261개 제목, 1,167 쌍 |
+
+### 23.3 결정
+
+표의 버린 대안은 근거 계층(0.1) 또는 구조로 버린 이유를 함께 적는다. 변형은 D5 처리와 같다(`논문-코드 충돌`: 논문을 따르고 코드 값은 변형 프로파일로만 둔다).
+
+| 번호 | 질문 | 채택 | 근거 | 버린 대안과 이유 | 변형 | 모듈 |
+|---|---|---|---|---|---|---|
+| D27 | 데이터셋을 어떻게 고르는가 | 설정 키를 더하지 않는다. 기존 닫힌 키 `prompt.template_path`로 고른다: `prompt/movie.txt` → MovieLens, `prompt/game.txt` → Steam, `prompt/artist.txt` → LastFM. 선택지를 셋으로 넓히고 `Config.validate`가 `prompt.template_path`–`sasrec.source_sha256`, `prompt.template_path`–`data.title_mode` 짝을 검사한다 | `[결정]`. 논문·코드에 선택자가 없다 (`U main.py:142-147`는 `data_dir` 문자열로 padding만 나눈다). 모든 키가 필수이고 코드 기본값이 없다 (`R ilora/config.py _build_section`, 4.6.2). 키 87개를 그대로 두면 `config_hash`와 `config.yaml`이 같아 54e5ae0 실행 폴더의 재개·평가가 그대로 된다 (`R ilora/config.py config_hash`, `R ilora/commands.py _reopen_for_resume`, `R ilora/train.py load_checkpoint`) | 새 키 `data.dataset`(기본 movielens): 없는 키를 채우는 예외와 `config_to_dict`에서 빼는 예외 둘이 필요하고, `test_m0_sections.py:49,:57-58`, `test_m14_profiles.py:21,:242`, KEY_TABLE, SCALAR_CHOICES, `paper_spec.yaml`, 3.1, 18.6.2를 고쳐야 한다. `sasrec.source_path`로 고르기: 닫힌 값이 아니다 | 없음 | M0, M1 |
+| D28 | 데이터셋 값의 자리, 아이템 id 상한 전달 | 값은 새 모듈 `ilora/datasets.py`의 frozen `DatasetSpec`에만 둔다. MovieLens 모듈 상수는 같은 이름의 별칭으로 남는다. `Sample`에 필드 `num_items`(기본 1682, compare·repr 제외)를 더해 M2 후보, M4 prompt, M5 padding이 표본에서 id 상한을 읽는다. 입력 해시 표는 `run.py`에 둔다(MovieLens는 `EXPECTED_INPUTS` 그대로, Steam·LastFM은 표 2개 추가) | `[결정]`. M0가 입력 해시의 소유자다 (3.1 경로와 해시). 호출 자리에서 빠뜨릴 수 없게 데이터에 붙인다 | 호출마다 `num_items` 인자: 시험·코드 호출 30여 곳을 고치거나 기본값을 두게 되고, 기본값을 빠뜨리면 Steam 표본 일부가 1682개 풀에서 조용히 뽑힌다 (이력·정답이 모두 < 1682인 행, seed와 무관). `InitVar`: 상한을 후보 쪽에서 읽을 수 없다 | 없음 | M0–M5, M11, M12, M15 |
+| D29 | Steam·LastFM의 최대 lr | Steam 1e-4, LastFM 2e-4 | `[논문 App E p.17]`. 논문-코드 충돌: `U train_steam.sh:19` 5e-4, `U train_lastfm.sh:19` 7e-4 (`L train_steam.sh:17`, `L train_lastfm.sh:17` 같음). 0.1대로 논문을 따른다 (D5와 같다) | 스크립트 값을 주 설정으로: 0.1 위반. 세 데이터셋 1e-4 (`U main.py:85` 기본값): 논문이 LastFM을 2e-4로 적는다 | `steam_variant_released_lr` 5e-4 / 5e-6 / 5e-6, `lastfm_variant_released_lr` 7e-4 / 7e-6 / 7e-6 | M10, M14 |
+| D30 | warmup 시작, lr 최솟값, warmup 길이 | 시작값 = 최대 lr / 100 (Steam 1e-6, LastFM 2e-6). 최솟값 = 시작값. w = T // 20 (295, 93) | 시작값 `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`. 최솟값 규칙 `[코드]` `U train_steam.sh:18,20`, `U train_lastfm.sh:18,20`, `U train_movielens.sh:18,20` (스크립트마다 최솟값 = 시작값 = lr/100). LastFM 값 2e-6은 그 규칙을 논문 최대값에 적용한 `[결정]`. w `[코드]` `U model/model_interface.py:248` | LastFM 최솟값 1e-6 (`U main.py:90` 기본값): 세 데이터셋의 비례가 깨진다. 차이는 마지막 몇 % step에만 있다 | D29 변형과 함께 | M10, M14 |
+| D31 | micro-batch × accumulation | Steam 4 × 32, LastFM 8 × 16 (곱 128) | 값 `[코드]` `U train_steam.sh:5-6`, `U train_lastfm.sh:5-6` (`L train_steam.sh:3-4`, 코드 계보 일치). 곱 128 `[v1 App E p.16]` `[LLaRA §5.1.2 p.7]`, MovieLens 값과 같은 처리 | Steam 8 × 16: 최장 micro-batch 토큰 B·L이 MovieLens의 1.41배(3,776 대 2,672, 측정)다. 4 × 32는 0.71배 | 없음. 메모리 측정 뒤 필요하면 사용자 판단으로 변경 (TBD) | M10, M14 |
+| D32 | 평가 batch 크기 | Steam 4, LastFM 8 | `[코드]` `U test_steam.sh:5`, `U test_lastfm.sh:5`. batch 무관성은 측정 항목 (15.6.10, DS7 둘째 실행의 `batch_invariance.json`, 23.6) | Steam 8: 평가 시간이 줄지만 값이 코드에 있으면 코드를 따른다 (0.1) | 없음 | M11, M14 |
+| D33 | Steam 데이터 판과 validation 파일 | 작업 트리 파일을 sha256으로 고정한다: `train_data.df`, `Test_data.df`, `id2name.txt`(= `U`)와 `Val_data.df`(`F babe9ec`가 추가, `U`에 없음) | `[LLaRA §5.1.1 p.7]` 8:1:1, `U data/steam_data.py:59-60`, `U data/data_interface.py:133` (validation 파일 필수인데 `U`에 없다). 판: `L README.md:11` 2024.5의 "last interacted item 반복 제거" 뒤 파일임을 내용으로 확인 (측정: 정답이 이력 마지막과 같은 행 0, `multi/datasets/s2_report.json`). 고정 방식 `[결정]`. `Val_data.df`의 출처 주장은 `F babe9ec` 메시지뿐이다(23.10 O2). `U data/ref/steam/test.ipynb`(blob `705a4b61`)의 출력은 구판 프레임(1행 `[3448, 855, 2710, 6, 2694, …]`, 다음 2694, `len_seq` 5: 구판 blob `7d5c1a9c`와 같은 행, 구판의 `len_seq ≥ 3` 표본은 1,192개)을 보이고, 현재 `U` blob `44f39d4f`의 같은 행은 `len_seq` 4다: 논문 Steam 행이 어느 판으로 돌았는지는 정하지 못한다(23.10 O3) | 자체 재분할: 논문과 비교할 수 없다. 구판 blob `7d5c1a9c`: 마지막 이력 반복 결함이 있다 (test 1,194행 중 567행, 측정 `multi/settings/lineage_check.py`). validation 없이 평가: D11 위반 | 없음 | M1, M14 |
+| D34 | LastFM 음성 후보 | D10 규칙 그대로: 음성 19개 + 정답을 M2 `draw_candidates`로 | `[논문 App B p.16]` `[LLaRA §5.1.3 p.7]`, `[코드]` `L data/lastfm_data.py:44-46`. 논문-코드 충돌: `U data/lastfm_data.py:43-46`은 음성 1개만 돌려주고 정답이 없다 (실행 확인 `multi/datasets/s7_run_u.py`) | `U` 동작 재현: HR@1이 구조적으로 0인 결함 (D26) | 없음 | M2 |
+| D35 | 난수 key에 데이터셋 이름을 넣는가 | 넣지 않는다. 후보·템플릿·학습 순서 key는 그대로다 | `[결정]`: 실행 하나는 데이터셋 하나만 쓴다. key를 바꾸면 MovieLens golden이 깨진다 (6.6.5, 23.7) | 데이터셋 항 추가: MovieLens 후보가 달라진다 | 없음 | M2, M4 |
+| D36 | SASRec checkpoint | Steam `rec_model/steam.pt`, LastFM `rec_model/lastfm.pt` | `[코드]` `U train_steam.sh:14`, `U test_steam.sh:14`, `U train_lastfm.sh:14`, `U test_lastfm.sh:14`, `L train_steam.sh:12` (같은 blob, 코드 계보 일치). 두 파일의 구조는 MovieLens와 같고 item 수만 다르다 (측정 `multi/sasrec_prompts/check_ckpts_arch.py`) | `rec_model/SASRec_steam.pt` (`U main.py:110` 기본값): 스크립트가 쓰지 않고 22개 텐서가 모두 다르다 (측정) | 없음 | M3, M14 |
+| D37 | 템플릿 | Steam `prompt/game.txt`, LastFM `prompt/artist.txt` 각 3줄 그대로(strip). 선택 규칙은 D15. `prompt/artist.txt:2`의 "10 music artist names"는 20 후보와 다르지만 그대로 둔다 | `[코드]` `U prompt/game.txt:1-3`, `U prompt/artist.txt:1-3`, `U data/data_interface.py:182-190`. 무작위 선택 `[LLaRA §5.1.2 p.7]`. "10"은 `U`·`L` 같은 문구다 (`L prompt/artist.txt:2`) | "20"으로 고치기: 코드 계보 밖의 입력 변경이다. 필요하면 변형으로 추가한다 | 없음 | M4 |
+| D38 | Steam·LastFM 제목 규칙과 인코딩 | 줄을 `::`로 나눠 `fields[1].strip()` (`code`). 파일은 UTF-8로 명시해 읽는다. `data.title_mode`는 `code`만 허용한다. 둘째 `::`는 등록된 id만 허용(Steam 354). 결함은 고치지 않고 `candidate_flags`로 표시한다 | 규칙 `[코드]` `U data/steam_data.py:68-75`, `U data/lastfm_data.py:60-67`. 유지 `[결정]`: D20과 같은 이유 (`[논문 p.6 §4]`). UTF-8 `[결정]`: `U`는 기본 인코딩이라 로케일에 의존하고 cp949에서 실패한다 (측정 `multi/datasets/s4_titles.py`). 파일은 UTF-8로 전부 디코드된다 | `fixed` 변형 제공: MovieLens 규칙(연도·관사)이 해당 없다. 요청이 있으면 최소 수정 목록은 23.2 표에 있다. ISO-8859-1: CJK·키릴 제목이 깨진다 | 없음 | M1, M2, M11 |
+| D39 | 대괄호 제목 | MovieLens 규칙은 그대로 둔다 (`[`, `]` 금지). Steam·LastFM은 슬롯·특수 토큰 문자열만 금지한다: `[HistoryHere]`, `[CansHere]`, `[HistoryEmb]`, `[CansEmb]`, `[PH]`, `[ItemEmb]`, `[PAD]`, `<s>`, `</s>`, `<unk>` | `[결정]`: 실제 제목 7개에 대괄호가 있다 (23.2). 슬롯 문자열은 없고 그 제목만으로 만든 prompt가 `R ilora/batching.py check_token_counts`를 통과한다 (측정 `multi/sasrec_prompts/extra_checks.py`) | 제목 고치기: D38 위반. 세 데이터셋 규칙을 좁히기: `tests/test_m4_prompts.py::test_check_catalog_titles`가 바뀐다 | 없음 | M4, M5 |
+| D40 | Steam 사용자 (D14 확장) | 블록 규칙(직전 창을 이으면 같은 블록)은 그대로다. 첫 창만 데이터셋별: Steam은 빈 이력으로 시작하지 않아도 되고 창 길이는 min(h0 + position, 10)이어야 한다. 블록 9,550, 표본 있는 사용자 9,542, validation·test offset 9,550·10,744. LastFM은 MovieLens와 같은 모양이다 | `[결정]`: 파일에 사용자 열이 없다. 블록 + val + test = `[LLaRA Table 1 p.7]` 11,938 (8:1:1 `[LLaRA §5.1.1 p.7]`, 측정 `multi/datasets/s3b_blocks_more.py`, 재확인 `multi/verify/check_numbers.py`) | 한 행 = 한 사용자: smoke와 D25의 user 단위 변형이 뜻을 잃는다. 빈 시작 규칙 유지: Steam 전부 거부 (`R ilora/data.py assign_users`) | 없음 | M1 |
+| D41 | 평가 N, 보조 프로토콜, 표 D (D17 확장) | 평가 N = 필터 뒤 split 전체 (drop_last 없음). 보조 프로토콜은 앞 ⌊N/b⌋·b 행 (D17 그대로, 23.2 표). 표 D의 LLaRA 행은 정답/전체: Steam (1186, 1183, 587), LastFM (122, 122, 55). Steam은 N = 1184의 해 (1184, 1181, 586)도 있어 N = 1186을 근거와 함께 고르고 표 D 주석에 둘 다 적는다 (23.2). iLoRA 행은 정수해가 없거나(Steam) N을 식별할 수 없어(LastFM) 개수를 적지 않고 그 사실을 문구로 적는다(`counts_text`). 우리 쪽 대조 값: LLaRA 행은 MovieLens와 같이 E1 전체 프로토콜(`valid_ratio`, `combined_metric`, N = 1,186 / 122), iLoRA 행은 같은 프로토콜을 식별할 수 없어 없음(우리 값은 표 A·C에 있다) | 정의 `[코드]` `U model/model_interface.py:180-184, :487-491`, "over all sequences" `[논문 p.6, App B p.16]`, `[LLaRA §5.1.3 p.7]`. 역산 `[결정]` (18.6.7과 같은 방법). N = 1186 선택 `[코드]` `L data/data_interface.py:142-147`(test loader에 drop_last 없음), `L data/data_interface.py:132` drop_last는 train만. 대조 값 선택 `[결정]`: 같은 프로토콜의 값끼리만 짝짓는다 (18.6.7, `R tools/compare_runs.py PAPER_REFERENCE`) | `drop_last` 축소 N만 보고: D17과 다르다. iLoRA 행에 임의의 N을 골라 대조: 식별되지 않은 프로토콜을 사실처럼 적게 된다 | 보조 프로토콜 `drop_last_bs4/8` | M11, M14 |
+| D42 | `len_seq ≥ 3` 필터 | 유지 | `[코드]` `U data/movielens_data.py:79`, `U data/steam_data.py:81`, `U data/lastfm_data.py:71`. 논문 언급 없음 | 필터 제거: 코드 계보와 다르고 표본 수가 달라진다 | 없음 | M1 |
+| D43 | 프로파일과 RUNBOOK의 자리 | 프로파일은 `rebuild/configs/datasets/<dataset>_<profile>.yaml`(이름이 전역 유일), 실행 문서는 새 파일 `rebuild/RUNBOOK_datasets.md` | `[결정]`: 폴더 이름 접두어 규칙 `latest <프로파일>` (`R RUNBOOK.md R0`, 접두어 뒤 숫자), `test_m0_sections.py:97-98`, `test_m14_profiles.py:207-208`이 top-level `configs/*.yaml`을, `test_m14_runbook.py`가 `RUNBOOK.md`를 고정한다. `extends: ../paper_spec.yaml` 동작 (`R ilora/config.py load_raw`) | top-level에 두기: 시험의 프로파일 목록 수정. `configs/steam/paper_spec.yaml`: `latest paper_spec`이 애매해진다 | 없음 | M14 |
+| D44 | 데이터셋별 필수 실험 | 필수: E2(iLoRA), E2 재평가, E1(K = 1), 비교표. 선택: E3, export·군집·E4, `variant_released_lr` (GPU 시간이 크므로 사용자 판단, 23.9) | `[결정]`: 논문 표 1의 비교는 iLoRA와 LLaRA 기준선이다 `[논문 p.7 Table 1]`. E3·E4는 MovieLens 연구의 후속 질문이다 (18.6.1) | 전 데이터셋 E1–E4 전부: Steam 학습 한 번이 약 17–19시간 (추정, 23.9) | 없음 | M14 |
+
+**D1–D26과의 관계**
+
+- 그대로 적용: D1, D2, D4, D7, D8, D9, D12, D13, D16, D18, D19, D22, D23, D26. (K = 4 `[논문 p.9 §4.3.2]`, z 64차원은 세 checkpoint가 같다, 측정 `multi/sasrec_prompts/check_ckpts_arch.py`.) LastFM 최대 lr 2e-4에서의 fp16 안정성은 측정 전이다(`VESSL_REQUIRED`, D9 규칙 그대로. 실패하면 데이터셋별 bf16 대안, 23.6).
+- 규칙은 같고 값이 데이터셋별: D3(curriculum T_mb), D5(→ D29), D6(→ D30), D10·D21(풀, D34·D38), D11(N), D14(→ D40), D15(→ D37), D17(→ D41), D20(→ D38), D24(끝 창), D25(train 표본 수 151,048·47,872). E4의 군집 단위는 표본(D25)을 그대로 쓴다.
+
+### 23.4 구조
+
+**데이터셋 규격.** `R ilora/datasets.py` (표준 라이브러리만 import, 다른 ilora 모듈을 import하지 않는다).
+
+```python
+@dataclass(frozen=True)
+class DatasetSpec:
+    name: str                       # "movielens" | "steam" | "lastfm"
+    data_dir: str                   # "data/ref/<name>"
+    item_file: str                  # "u.item" | "id2name.txt"
+    item_format: str                # "uitem" | "id2name"
+    num_items: int                  # padding id와 같다 (U main.py:142-147)
+    has_ratings: bool               # seq와 next가 (item, rating) 쌍인가
+    first_window_empty: bool        # train 블록이 빈 이력에서 시작하는가 (D14, D40)
+    extra_separator_ids: tuple[int, ...]   # id2name에서 둘째 "::"를 허용하는 id (Steam (354,))
+    expected_rows: Mapping[str, int]       # 필터 전 행 수 (5.6.2)
+    expected_samples: Mapping[str, int]    # len_seq >= 3 뒤 표본 수
+    train_blocks: int               # train 블록 수 (필터 전)
+    train_users: int                # 표본이 있는 사용자 수 (필터 뒤)
+    fingerprints: Mapping[str, str]        # split별 frame 지문 (5.6.9)
+    template_file: str              # "prompt/movie.txt" | "prompt/game.txt" | "prompt/artist.txt"
+    sasrec_source: str              # "rec_model/movielens.pt" | ...
+    title_modes: tuple[str, ...]    # ("code", "fixed") | ("code",)
+    title_forbidden: tuple[str, ...]       # check_catalog_titles가 금지하는 문자열 (D39)
+
+    # 파생: pad_id = num_items, data_files = (train, val, test, item_file 경로),
+    # user_offset = {"train": 0, "val": train_blocks, "test": train_blocks + expected_rows["val"]}
+```
+
+- `MOVIELENS`, `STEAM`, `LASTFM`는 모듈 상수다. `SPECS: Mapping[str, DatasetSpec]`, `for_template(path) -> DatasetSpec`(닫힌 대응, 모르는 경로는 `DatasetError`), `spec_of(cfg) -> DatasetSpec` = `for_template(cfg.prompt.template_path)`. `SPLIT_FILES`(세 split 파일 이름)도 이 모듈에 있다 `R ilora/datasets.py for_template`, `R ilora/datasets.py spec_of`.
+- MovieLens 값은 `R ilora/data.py` 상수와 정확히 같다. `data.py`의 `NUM_ITEMS`, `PAD_ID`, `DATA_DIR`, `ITEM_FILE`, `USER_OFFSET`, `EXPECTED_ROWS`, `EXPECTED_SAMPLES`, `TRAIN_USERS`, `EXPECTED_FINGERPRINTS`는 `MOVIELENS`의 별칭으로 남는다. `cluster.DATA_FILES`, `evaluate.FULL_SPLIT_SIZE`, `prompts.TEMPLATE_FILE`, `batching.PAD_ITEM`도 그대로 둔다.
+
+**설정 키.** 데이터셋을 고르는 키는 기존 `prompt.template_path`다. 새 키가 없다(D27). 코드 기본값도 없다: 모든 키는 필수이고 프로파일에 적는다(`R ilora/config.py _build_section`, 4.6.2). MovieLens 프로파일 17개는 `prompt/movie.txt`를 이미 적고 있으므로 이전에 만든 `config.yaml`은 MovieLens를 고른다. 선택지 3개는 `sections.py`에서 `tuple(s.template_file for s in SPECS.values())`로 만든다. 키 개수는 87개 그대로다.
+
+**입력 해시.** `R ilora/run.py EXPECTED_INPUTS`는 MovieLens 6개 항목 그대로 둔다(시험이 고쳐 쓰는 이름이다). `EXPECTED_INPUTS_STEAM`, `EXPECTED_INPUTS_LASTFM`(각 6개, 키 형식은 같다)을 더한다. `expected_inputs(dataset="movielens")`가 표를 돌려주고, `input_hashes(repo_root=REPO_ROOT, dataset="movielens")`, `check_environment(..., dataset="movielens")`가 이 표를 쓴다. 기본값이 MovieLens라 `start_meta`의 기본 호출과 기존 시험이 그대로다. `expected_inputs`는 호출 시점의 모듈 속성을 돌려준다: `run.EXPECTED_INPUTS`를 바꿔 쓰는 기존 시험(`tests/test_m0_config_run.py:212, :632`)이 환경 점검에 그대로 반영된다. 설정 검사(`sections.py`)는 이 accessor를 쓰지 않는다(아래 `Config.validate`) `R ilora/run.py expected_inputs`.
+
+**값의 흐름**
+
+| 규격 항목 | 받는 곳 |
+|---|---|
+| `spec_of(cfg)`를 부르는 곳 | M1 `load_dataset`, M0 `run_command`·`environment_check`, M10 `_Trainer.prepare`·`current_provenance`, M11 `evaluate_split`·`_metrics_meta`·`_input_hash_problems`·`_cluster_hard_gate`·`run_eval_command`, M12 `_cluster_hard_gate`(`run_export`는 `load_dataset`으로 받음), M13 `_SmokeRun`·`overfit_generation_check`·`_check_env_step`, M15 `run_cluster`. M5의 `PlannedTrainBatches`·`EvalBatches`는 `for_template(prompt_cfg.template_path)` |
+| `data_dir`, `item_file`, `item_format`, `expected_rows`, `expected_samples`, `fingerprints`, `has_ratings`, `first_window_empty`, `extra_separator_ids`, `train_blocks`, `train_users`, `user_offset` | M1 함수 인자 `spec`(keyword, 기본 `MOVIELENS`): `read_raw_titles`, `build_catalog`, `frame_fingerprint`, `parse_rows`, `assign_users`, `to_samples`, `_verified_paths`, `select_smoke` |
+| `num_items`, `pad_id` | M1 `ItemCatalog`, `Sample.num_items`(새 필드). M2 `candidates_for`와 M4 `build_prompt`는 `sample.num_items`. M5 `_batch_common`, M12 `compute_representations`, M15 `verify_live_encoder`는 `samples[0].num_items`로 padding. M3 `encode_all`·`verify_against_reference`는 `item_num` |
+| `name` | M0 `input_hashes`·`check_environment`, M11 평가 meta의 `dataset`, M14 |
+| `template_file`, `sasrec_source` | M0 `sections` 교차 검사, M4 `load_templates(path, *, spec=MOVIELENS)`, M13 `smoke.py`의 `load_templates`, M3 변환 도구 |
+| `title_modes` | M0 `Config.validate` |
+| `title_forbidden` | M4 `check_catalog_titles(catalog, forbidden=…)`, M5 `PlannedTrainBatches`·`EvalBatches`, M13 `smoke.py`의 `check_catalog_titles` |
+| `data_files` | M15 `run_cluster` |
+| `expected_samples["val"/"test"]` | M11 `_expected_size(data, split, spec)` |
+
+**`Config.validate` 추가 (구역 간 검사, 3.1)**: `spec = for_template(prompt.template_path)`. `sasrec.source_sha256`이 그 데이터셋의 `spec.sasrec_source` 항목 해시와 다르면 ConfigError(`prompt.template_path` 이름 포함). `data.title_mode not in spec.title_modes`면 ConfigError(`data.title_mode`). `SasrecConfig.validate`는 세 체크포인트 해시 중 하나인지 확인한다. 두 검사가 읽는 해시 표는 `sections.py`가 import 시점에 묶어 둔다(`from .run import EXPECTED_INPUTS, EXPECTED_INPUTS_STEAM, EXPECTED_INPUTS_LASTFM`, `R ilora/sections.py _INPUT_TABLES`; 54e5ae0의 `SasrecConfig.validate`와 같은 방식) `R ilora/sections.py Config.validate`. `run.expected_inputs()`는 호출 시점의 속성을 읽는 accessor라 설정 검사에 쓰지 않는다: `tests/test_m0_config_run.py:632`가 `run.EXPECTED_INPUTS`를 작은 표로 바꾼 뒤 `load_config`를 부르면 `KeyError`가 난다(측정 `multi/critic/c10_patch.py`). `test_ds_spec.py`가 묶인 표 = `run.expected_inputs(name)`을 고정한다.
+
+**가장 작은 구조인 이유.** 새 파일은 `datasets.py` 하나다. `LoadedData`, `ItemCatalog` 필드, `Config`, 설정 키, 실행 폴더 형식, `RUNBOOK.md`, 프로파일 17개는 그대로다. `Sample`만 필드 하나가 늘고 그 기본값이 지금 동작이다.
+
+### 23.5 모듈별 변경
+
+| 모듈 | 변경 | 바뀌지 않음 |
+|---|---|---|
+| M0 | `datasets.py` 추가. `run.expected_inputs`, `input_hashes(…, dataset=)`, `check_environment(…, dataset=)`. `sections.py`: `template_path` 선택지 3개, `SasrecConfig.validate` 해시 집합 검사, `Config.validate` 교차 검사(표는 import 시점 묶음, 23.4). `commands.py`: `run_command`·`environment_check`가 `spec_of(cfg).name`을 넘김 | 키 87개, `config.py`, `config_hash`, `config.yaml` 형식, 난수 key(D35), `EXPECTED_INPUTS` 6개 항목, `start_meta` 기본 동작 |
+| M1 | `read_raw_titles`에 id2name 읽기(UTF-8, `::`, 줄 번호 = id, `extra_separator_ids`). `build_catalog`가 `code` 제목에 `strip`(id2name). `parse_rows`·`frame_fingerprint`에 int 행 경로. `assign_users`의 첫 창 규칙(D40). `to_samples`가 `Sample.num_items`를 채움. `load_dataset`이 `spec_of(cfg)`만 씀. `ItemCatalog`는 알려진 `num_items`와 `pad_id == num_items`를 확인 | MovieLens 경로의 파일 읽기, 파싱 오류 문구, 필터, 지문, 블록 규칙, `title_report`(MovieLens 전용), `pad_histories` |
+| M2 | `candidates_for`가 `sample.num_items`를 씀. 후보 hash·표시 golden을 새 시험에 고정 | key(D35), `draw_candidates` 순서, `negative_pool`, `candidate_flags`, `match_norm`, `self_check`와 golden |
+| M3 | `encode_all`, `verify_against_reference`가 `item_num`으로 padding. `tools/convert_sasrec.py --dataset`(기본 movielens): 데이터셋별 pickle blob·sha256, 데이터 폴더, 표본 수, 아키텍처, 행 형식(int), 출력 이름 `sasrec_<dataset>_{state,reference}.pt`. 표는 `R tools/convert_sasrec.py dataset_pins` | 원본 소스 고정 blob, `__main__.SASRec` 허용 목록, D12·D23, MovieLens 변환 결과와 CLI 기본값, 인코더 동작 |
+| M4 | `load_templates(path, *, spec=MOVIELENS)`, `check_catalog_titles(catalog, forbidden=…)`(기본은 지금 규칙), `build_prompt`가 `sample.num_items`로 경계 검사 | `TEMPLATE_FILE`, 템플릿 파싱, D15 key, curriculum(D3), `make_batch_plan`, prompt 조립 |
+| M5 | `_batch_common`이 `samples[0].num_items`로 padding. `PlannedTrainBatches`·`EvalBatches`가 데이터셋 `title_forbidden`을 넘김 | tokenizer, `max_seq_len`(1024 유지, 23.2 구성 최장 939), label, `PAD_ITEM` 상수, 토큰 수 검사 |
+| M6 | 없음 (64→4096, 입력 차원 동일) | 전부 |
+| M7 | 없음 (z 64차원, K = 4) | 전부 |
+| M8 | 없음 | 전부 |
+| M9 | 없음 (`pad_item = catalog.pad_id`, 이미 일반 `R ilora/model.py build_model`) | 전부. TrainableParams는 데이터셋과 무관 (`R tools/compare_runs.py EXPECTED_TRAINABLE`) |
+| M10 | `_Trainer.prepare`·`current_provenance`가 `spec_of(cfg)`로 템플릿·입력 해시를 씀 | 학습 루프, D24 창, `step_counts` 공식, checkpoint 형식 |
+| M11 | `_expected_size(data, split, spec)`, `load_templates` 호출, `_input_hash_problems`, 평가 meta의 `dataset` 값 | 판정(D17), 생성 파라미터, 재현 비교, `AUX_DROP_LAST_BATCH_SIZES` |
+| M12 | `compute_representations`의 padding, `_cluster_hard_gate`의 입력 해시 | 기록 형식, 대조, gate 분석 |
+| M13 | `smoke.py`: `input_hashes` 검사가 데이터셋 표를 쓰고, `load_templates`·`check_catalog_titles` 호출(`R ilora/smoke.py`)이 데이터셋 규격을 받는다. 새 시험 (23.8). 나머지 판정은 값이 M1·M4·M10 함수에서 와 그대로다 | 기존 시험(23.7의 세 줄 제외), 기존 smoke 계획 |
+| M14 | `configs/datasets/` 18개, `RUNBOOK_datasets.md`, `tools/compare_runs.py`가 실행의 `prompt.template_path`로 데이터셋을 읽어 표 D(`PAPER_REFERENCE`, `PAPER_REFERENCE_STEAM`, `PAPER_REFERENCE_LASTFM`, 개수가 없는 행은 `counts_text` 문구), 한계 문구, 정의 문구를 데이터셋별로 고름(`R tools/compare_runs.py PAPER_TEXTS`, `R tools/compare_runs.py comparison_dataset`). 섞이면 `CompareError`. 비교 실행 `meta.json`의 `inputs`는 읽은 데이터셋의 표(MovieLens가 아니면 `update_meta`로 다시 씀) | `configs/*.yaml` 17개와 `RUNBOOK.md` byte 불변, MovieLens의 비교표 출력 byte(23.7 (f)로 확인), CSV 열 |
+| M15 | `run_cluster`가 `spec.data_files`, `run.input_hashes(repo_root, spec.name)`를 씀. `verify_live_encoder` padding. `_check_sample_ids`의 `current_full`이 어느 데이터셋이든 전체 표본 수와 같은지로 판정 | KMeans 규칙(D25), 산출물 형식, `load_cluster_artifacts` 인자 (시험 stub 시그니처 그대로) |
+
+- M15의 `_check_sample_ids` 판정: smoke 표본 수는 어느 데이터셋의 전체 표본 수와도 같을 수 없다(val 10 ≠ 94·1,184·122). 인자를 늘리지 않아 시험 stub(`tests/test_m11_evaluate.py:982`)이 그대로다.
+
+### 23.6 프로파일과 RUNBOOK
+
+**프로파일.** `rebuild/configs/datasets/`, 파일마다 첫 줄 ASCII 주석, ASCII만. `<d>` = `steam`, `lastfm`. 데이터셋마다 9개, 합쳐 18개.
+
+| 파일 | 부모 | 부모와 다른 키 |
+|---|---|---|
+| `<d>_paper_spec.yaml` | `../paper_spec.yaml` | `sasrec.source_path`, `sasrec.source_sha256`, `sasrec.state_path`, `sasrec.state_digest`, `sasrec.reference_path` (23.2 표), `prompt.template_path`. Steam만: `train.micro_batch_size` 4, `train.grad_accum` 32, `eval.batch_size` 4. LastFM만: `train.lr_peak` 2.0e-4, `train.lr_warmup_start` 2.0e-6, `train.lr_floor` 2.0e-6 |
+| `<d>_llara_baseline.yaml` | `<d>_paper_spec.yaml` | `lora.num_experts` 1, `router.routing_mode` none |
+| `<d>_variant_text_only_eval.yaml` | `<d>_paper_spec.yaml` | `prompt.eval_prompt` text_only |
+| `<d>_cluster_hard.yaml` | `<d>_paper_spec.yaml` | `router.routing_mode` cluster_hard |
+| `<d>_variant_released_lr.yaml` | `<d>_paper_spec.yaml` | `train.lr_peak`, `train.lr_warmup_start`, `train.lr_floor` (D29 변형값) |
+| `<d>_variant_bf16.yaml` | `<d>_paper_spec.yaml` | `model.torch_dtype` bfloat16, `train.precision` bf16_amp (`configs/variant_bf16.yaml`과 같은 차이, D9 대안. 쓰는 조건은 아래 bf16 대안) |
+| `<d>_smoke_cpu.yaml` | `<d>_paper_spec.yaml` | `smoke_cpu.yaml`과 같은 키: `data.subset` smoke, `data.smoke_users` [2, 10, 10], `batching.num_workers` 0, `model.backbone` tiny_random, `model.torch_dtype` float32, `model.device` cpu, `train.epochs` 2, `train.micro_batch_size` 4, `train.grad_accum` 4, `train.warmup_divisor` 4, `train.precision` fp32, `eval.batch_invariance_check` true, `records.flush_every_steps` 5, `cluster.live_check_n` 64. `lastfm_smoke_cpu.yaml`만 `train.warmup_divisor` 3, `cluster.live_check_n` 32 (아래 smoke 값의 이유) |
+| `<d>_smoke_gpu_100.yaml` | `<d>_paper_spec.yaml` | `smoke_gpu_100.yaml`과 같은 키: `data.subset` smoke, `train.epochs` 2, `eval.batch_invariance_check` true. `steam_smoke_gpu_100.yaml`만 `train.warmup_divisor` 10 추가 (아래 smoke 값의 이유) |
+| `<d>_overfit_gpu.yaml` | `<d>_paper_spec.yaml` | `overfit_gpu.yaml`과 같은 키. `data.smoke_users` [16, 10, 10], `prompt.train_curriculum` all_hybrid, `train.epochs` 25, `train.micro_batch_size` 4, `train.grad_accum` 1, `data.train_rows` 아래 표 |
+
+`sasrec.state_path` = `runs/rebuild/assets/sasrec_<d>/sasrec_<d>_state.pt`, `sasrec.reference_path` = `runs/rebuild/assets/sasrec_<d>/sasrec_<d>_reference.pt`.
+
+**smoke 값의 이유.** smoke의 E4·E1 단계는 `train.epochs=1`로 돈다(`R ilora/smoke.py _E4_SETS`, `_E1_SETS`). `R ilora/train.py step_counts`는 w = T // `train.warmup_divisor`가 0이면 `TrainingError`이고, `R ilora/cluster.py verify_live_encoder`는 `cluster.live_check_n`이 train 표본 수보다 크면 `ClusterError`다. MovieLens smoke 프로파일과 값이 다른 것은 표본이 적은 아래 둘뿐이다(`lastfm_smoke_cpu`, `steam_smoke_gpu_100`). 고치는 곳은 프로파일이다: `step_counts`와 `verify_live_encoder`는 MovieLens와 공유하는 코드라 느슨하게 하지 않는다(`test_ds_profiles.py`가 실제 표본 수로 검사, 23.8).
+
+| 프로파일 | train 표본 | T (2 epoch, 1 epoch) | 값 | 결과 |
+|---|---|---|---|---|
+| `lastfm_smoke_cpu` | 41 | T = 6, 3 | `train.warmup_divisor` 3, `cluster.live_check_n` 32 | w = 2, 1. S0–S8 전체 통과 (검사 84개: 통과 78, 실패 0, 기록 6; `R tests/test_ds_smoke_cpu.py`, 설계 때 dry-run `multi/critic/c07_dryrun.py`). 바꾸지 않으면 S5·S7이 w = 0으로 실패한다 |
+| `steam_smoke_cpu` | 80 | T = 10, 5 | `train.warmup_divisor` 4, `cluster.live_check_n` 64 (`smoke_cpu.yaml`과 같은 값) | w = 2, 1. S0–S8 전체 통과 (검사 84개: 통과 78, 실패 0, 기록 6; `R tests/test_ds_smoke_cpu.py`) |
+| `steam_smoke_gpu_100` | 1,385 | T = 22, 11 | `train.warmup_divisor` 10 | w = 2, 1. 바꾸지 않으면(20) G5·G6에서 w = 0으로 실패한다 |
+| `lastfm_smoke_gpu_100` | 3,626 | T = 58, 29 | `train.warmup_divisor` 20 (부모 값) | w = 2, 1 |
+
+계산: `multi/critic/c7_steps.py`, `multi/critic/c03_smoke_math.py` (지금 코드의 `step_counts`로 계산).
+
+`data.train_rows` (규칙: 사용자 번호 오름차순으로 마지막 창의 이력 길이가 10인 사용자 앞 16명의 마지막 창, 18.6.5 규칙의 일반화, 정답 16개 서로 다름; 계산 `multi/verify/check_numbers2.py`):
+
+| 데이터셋 | 행 | 제외한 앞 사용자 |
+|---|---|---|
+| Steam | 39, 94, 129, 133, 210, 230, 316, 329, 344, 601, 748, 749, 762, 795, 812, 939 | 사용자 1 (마지막 창 길이 6) |
+| LastFM | 61, 94, 168, 181, 199, 433, 525, 546, 564, 591, 617, 628, 643, 657, 680, 732 | 사용자 0, 7, 12, 18 (길이 7, 7, 3, 6) |
+
+**RUNBOOK.** 새 파일 `rebuild/RUNBOOK_datasets.md`. `RUNBOOK.md`와 같은 형식(명령, 산출물, 확인)이고 LastFM·Steam 각각의 단계를 낱낱이 적는다. R0의 도움말 함수를 그대로 쓰고 `dsoutputs()`(새 시험 묶음)를 더한다. 모든 명령은 `RUNBOOK.md`의 규칙을 따른다(저장소 루트, `CUDA_VISIBLE_DEVICES=0`, tmux, `done_ok`, `rec`, `need`). 기록 변수는 `ILORA_RUN_<DATASET>_<단계>`다(`ILORA_RUN_STEAM_E2` 등).
+
+| 단계 | 내용 | 명령 (`<d>` = lastfm 또는 steam) | 필수 | 확인 |
+|---|---|---|---|---|
+| DS0 | 셸 준비 | R0과 같음 + `dsoutputs()` | 필수 | R0과 같음 |
+| DS1 | SASRec 변환 (LastFM, Steam 둘 다, 그 기계에서 한 번, DS2 전에) | R2의 코드 기록 세 줄 뒤에 `python -I rebuild/tools/convert_sasrec.py --repo . --dataset <d> --out runs/rebuild/assets/sasrec_<d>` | 필수 | 종료 코드 0, manifest digest = 프로파일 `sasrec.state_digest` |
+| DS2 | 시험 묶음 (새 commit에서 한 번, DS1 뒤) | `python -I -m pytest rebuild/tests -q`, 이어서 `ILORA_VESSL=1 python -I -m pytest rebuild/tests/vessl -q -k "not run_outputs"` (`R RUNBOOK.md R3`와 같음) | 필수 | 실패 0. skip 규칙은 `R RUNBOOK.md R3`와 같다: 두 데이터셋의 DS1 변환본과 `ILORA_TEST_TOKENIZER`가 있으므로 CPU 묶음의 skip은 `VESSL_REQUIRED`뿐이고, VESSL 묶음의 skip은 0(`SKIP_NO_PL`이면 `measurements.json`) |
+| DS3 | 환경 점검 | `python -I rebuild/main.py check-env --config rebuild/configs/datasets/<d>_paper_spec.yaml` | 필수 | `check_env.json` passed, SASRec 기준 대조 CUDA ≤ 1e-4 (7.8 #12) |
+| DS4 | smoke 2단계 | `… smoke --config …/<d>_smoke_gpu_100.yaml` | 필수 | `smoke_report.json` passed, `dsoutputs <d>_smoke_gpu` |
+| DS5 | smoke 3단계 (과적합) | `… smoke --config …/<d>_overfit_gpu.yaml` | 필수 | 17.6.8과 같은 기준, `dsoutputs <d>_overfit` |
+| DS6 | E2 학습 | `… train --config …/<d>_paper_spec.yaml` | 필수 | `dsoutputs <d>_e2_run` (23.2의 micro·step·N) |
+| DS7 | E2 재평가 2회 (결정성, batch 무관성, `R RUNBOOK.md R8`와 같은 형태) | `… eval --config …/<d>_paper_spec.yaml --set eval.source_run=<E2>` (기록 `ILORA_RUN_<D>_E2_REEVAL`), 이어서 `… eval --config …/<d>_paper_spec.yaml --set eval.source_run=<E2> --set eval.batch_invariance_check=true` (기록 `ILORA_RUN_<D>_E2_REEVAL_BI`) | 필수 | `dsoutputs <d>_e2_reeval`: 두 실행의 `reproduction` `identical`, 둘째 실행의 평가 폴더마다 `batch_invariance.json`(일치율은 기록만, TBD) |
+| DS8 | E1 학습 | `… train --config …/<d>_llara_baseline.yaml` | 필수 | `dsoutputs <d>_e1` |
+| DS9 | 비교표 | `python -I rebuild/tools/compare_runs.py --run E1=… --run E2=…` (`latest compare`) | 필수 | 상태 `completed`, 빠진 실험은 NOT_RUN |
+| DS10 | E3 평가 | `… eval --config …/<d>_variant_text_only_eval.yaml --set eval.source_run=<E2>` | 선택 | R9와 같음 |
+| DS11 | E2 export·gate 분석 | R10과 같음 (`<d>_paper_spec`) | 선택 (DS12의 전제) | `dsoutputs <d>_e2_export` |
+| DS12 | 군집 | R11과 같음 | 선택 (DS13의 전제) | `dsoutputs <d>_cluster` |
+| DS13 | E4 학습·export | R12와 같음 (`<d>_cluster_hard`) | 선택 | `dsoutputs <d>_e4` |
+| DS14 | 변형, 선택 단계를 돌렸으면 비교표 다시 (R15와 같은 방식, 기록 `ILORA_RUN_<D>_COMPARE_ALL`) | `… train --config …/<d>_variant_released_lr.yaml`, 이어서 `python -I rebuild/tools/compare_runs.py --run E1=… --run E2=… …` | 선택 | `done_ok` |
+
+- 재개 규칙, tmux, 보관(R16)은 `RUNBOOK.md`를 그대로 따른다.
+- bf16 대안(R7의 실패 규칙에서만, D9): `RUNBOOK.md`의 "bf16 대안" 절은 명령이 MovieLens 프로파일과 `ILORA_RUN_E2`를 가리키므로 그대로 쓰면 MovieLens를 다시 학습하고 그 경로 기록을 덮어쓴다. `RUNBOOK_datasets.md`가 데이터셋별 명령을 따로 적는다: DS6·DS7의 E2는 `<d>_variant_bf16.yaml`로 처음부터, DS8(E1)·DS10(E3)·DS13(E4)와 변형은 각 프로파일에 `--set model.torch_dtype=bfloat16 --set train.precision=bf16_amp`, 기록은 `ILORA_RUN_<D>_…`. 쓰면 편차로 기록한다.
+
+**실행 순서.** (1) 54e5ae0의 MovieLens 실행이 끝난다(23.1). (2) 구현 commit을 VESSL에 올리고 DS1을 LastFM과 Steam 둘 다 돌린다(CPU, 몇 분). (3) DS2(시험 묶음)를 돌린다(`R RUNBOOK.md`의 R2→R3 순서와 같다). (4) LastFM DS3–DS9. 가장 작아 새 코드 경로를 싸게 확인한다(T 1,870). (5) Steam DS3–DS9는 LastFM DS3–DS6이 통과한 뒤 시작한다. 판정은 완료 표시와 기록 수(`done_ok`, `dsoutputs`)이지 정확도가 아니다.
+
+**실패 시 멈춤.** `RUNBOOK.md` 규칙과 같다. 단계의 확인이 실패하면 그 데이터셋의 다음 단계를 돌리지 않고 원인을 기록한다(`meta.json` `error`, `run.log`). 어느 데이터셋의 DS1 또는 DS2가 실패하면 DS3 이후를 시작하지 않는다. LastFM DS3·DS4·DS5가 실패하면 Steam DS3 이후를 시작하지 않는다(공통 코드 경로). LastFM E2의 학습 실패가 데이터셋 고유 원인(예: lr 2e-4의 fp16 불안정, D9 규칙)이면 원인을 기록하고 Steam 진행은 사용자가 정한다. GradScaler skip 연속 16회, 비유한 parameter는 D9 규칙대로 멈춘다.
+
+**로컬 CPU smoke.** 데이터셋마다 한 번. `ILORA_TEST_TOKENIZER`에 실제 tokenizer 폴더를 준다. 작은 무작위 LLaMA(`tiny_random`)이고 Llama-2를 쓰지 않는다. 먼저 `python -I rebuild/tools/convert_sasrec.py --repo <저장소> --dataset <d> --out runs/rebuild/assets/sasrec_<d>`를 CPU에서 한 번 돌린다. 그다음 시험으로 `tests/test_ds_smoke_cpu.py` (임시 폴더에 쓰는 `run_smoke`, 저장소 밖), 또는 명령 `python -I rebuild/main.py smoke --config rebuild/configs/datasets/<d>_smoke_cpu.yaml` (실행 폴더는 git 밖 `runs/rebuild/`). 계획은 S0–S8(`R ilora/smoke.py`)이고 Steam은 train 표본 80, LastFM은 41이다(계산 `multi/verify/check_numbers2.py`). 2026-11-09 이 기계 결과: 둘 다 통과 (위 smoke 값 표, `R tests/test_ds_smoke_cpu.py`).
+
+### 23.7 MovieLens 불변 증명
+
+증명의 기준은 로컬 실행 폴더 `runs/rebuild/smoke_cpu_20261106T142722Z`다(2026-11-06 CPU smoke). 그 `meta.json`의 `code.rebuild_files`는 지금의 `rebuild/`와 76개 중 75개가 같고(다른 파일은 `DESIGN.md`뿐), `config_hash`는 지금의 `smoke_cpu.yaml`과 같다(측정 `multi/rebuild_parametrize/ref_meta_check.py`). 다음을 모두 통과해야 한다. (a)–(e)는 단계 s01 끝과 s10에서, (f)는 s07 끝과 s10에서 돌린다.
+
+(a) **프로파일과 입력.** `python -I multi/rebuild_parametrize/golden_profiles.py`의 출력이 기준 파일 `multi/rebuild_parametrize/golden_profiles.txt`와 같다: MovieLens 프로파일 17개의 `config_hash`, `dump_config` 바이트 sha256, 키 87개, `run.input_hashes()`의 6개 값. `golden_profiles.txt`의 dump sha256은 Windows 전용 기준이다: `R ilora/config.py dump_config`는 text 모드로 쓰므로 Windows에서 CRLF, Linux에서 LF다(측정 `multi/critic/c05_checks.py`, `config_hash`는 무관). 영구 시험 `rebuild/tests/test_ds_spec.py`에는 `config_hash` 17개와 dump 바이트의 CRLF를 LF로 바꾼 뒤 계산한 sha256을 literal로 둔다(Windows와 VESSL에서 같은 값).
+
+(b) **기준 smoke와 같은 결과.** 코드가 바뀐 뒤 CPU smoke를 임시 폴더에서 다시 돌린다(`multi/rebuild_parametrize/fresh_smoke.py`, `torch_num_threads` 14 동일). `python -I multi/rebuild_parametrize/regress_check.py <기준 폴더> <새 폴더>`가 `RESULT: PASS`여야 한다. 확인 내용: `smoke_report.json` 검사 84개 id·결과·측정값, `records.jsonl` 11개의 byte, `representations.npz` 배열 bit, 학습 CSV의 비시간 열, 단계별 `config.yaml`(폴더 경로만 정규화), `meta.json`의 `config_hash`·`inputs`·`assets` sha256, `trainable.pt` 텐서 bit, `selection.json`·`batch_invariance.json`·`crosscheck.json`·`gate_summary.json`·`cluster_summary.json` 값, `metrics.json`(metrics, aux, supplementary 같음, meta는 시간·commit·checkpoint 경로만 다름), `centroids.npz` bit. 허용되는 차이는 시간 값, 실행 폴더 절대 경로, `git_commit`뿐이다(`multi/rebuild_parametrize/regress_check.py`에 그대로 적혀 있다).
+
+(c) **기존 실행 폴더가 그대로 읽힌다.** `python -I multi/rebuild_parametrize/compat_check.py <기준 폴더> <임시 폴더>`: ① 기준 폴더의 단계마다 `config.yaml`이 읽히고 `config_hash`가 `meta.json`과 같다(`train --resume` 조건, `R ilora/commands.py _reopen_for_resume`). ② 기준 S1 학습 실행을 `eval` 명령으로 다시 평가해 `reproduction`이 `identical`이다. ③ 기준 S1을 `export` 명령으로 내보낸 결과가 기준 S3 단계의 export와 같다(npz 배열 bit, JSON·CSV 값, 경로·시간 값과 npz 파일 sha256은 제외). ④ 기준 S1의 복사본에서 마지막 epoch의 `COMPLETE`와 `STATE_SAVED`를 지우고 상태를 `failed`로 바꿔 `train --resume`: `load_checkpoint`가 이전 epoch checkpoint를 `current_provenance`로 대조해 읽고, 마지막 epoch를 다시 학습해 `trainable.pt`가 기준과 bit 단위로 같다. 현재 코드 기준으로 이미 통과한다(2026-11-09, `multi/rebuild_parametrize/compat_check.py`). 54e5ae0 실행 폴더가 같은 코드 경로를 쓴다는 추론의 근거다(원격 실행은 건드리지 않는다).
+
+(d) **기존 시험.** 전체 시험이 기준선과 같다: `745 passed, 37 skipped`(21장 2026-11-06 기록)에 새 시험이 더해진 것. 스킵은 모두 `VESSL_REQUIRED`. 기존 시험 파일에서 다음 세 줄만 바꾼다.
+
+| 파일:줄 | 바꾸는 내용 | 이유 |
+|---|---|---|
+| `tests/test_m1_data.py:182` | `dataclasses.fields(Sample)` 이름 목록에 `num_items` 추가 | D28: `Sample`의 필드가 하나 늘어난다. 이 줄은 cluster 정보 유입을 막는 검사이며 뜻은 그대로다 |
+| `tests/test_m4_prompts.py:195` | 기대 `choices`를 세 파일로 | D27: 선택지가 3개가 된다. `:196-197`의 거부 시험(`paper_spec` + `prompt/game.txt`)은 `Config.validate` 교차 검사로 그대로 통과한다 |
+| `tests/test_m14_profiles.py:120` | `SCALAR_CHOICES`의 `prompt.template_path`를 세 파일로 | D27과 같다. `KEY_TABLE`, `:242`의 87은 바꾸지 않는다 |
+
+그 밖의 기존 시험은 바꾸지 않는다. `test_m13_coverage.py`, `test_m0_sections.py`(`CONFIG_DIR.glob("*.yaml")`은 top-level만 본다), `test_m14_runbook.py`(`RUNBOOK.md` byte 불변), `test_m3_convert.py`(`--dataset` 기본값 movielens, 모듈 상수 유지)도 그대로다.
+
+(e) **파일이 그대로.** `git diff 54e5ae0 -- ':(glob)rebuild/configs/*.yaml' rebuild/RUNBOOK.md rebuild/main.py`가 비어 있다(`rebuild/configs/datasets/`는 새 폴더라 대상이 아니다. glob을 pathspec magic으로 쓰는 이유: 그냥 `*`는 `/`까지 맞아 커밋 뒤에 `datasets/` 파일까지 잡는다).
+
+(f) **MovieLens 비교표 출력.** `python -I multi/rebuild_parametrize/compare_regress.py <기준 폴더> <임시 폴더>`: 커밋 54e5ae0의 `tools/compare_runs.py`(git show)와 작업 트리의 `tools/compare_runs.py`를 같은 기준 smoke 폴더(E1–E4 실행, E2 export, 군집)로 돌려 `comparison.csv`, `comparison.md`, `spec20_index.json`, `summary.md`가 같아야 한다(가리는 값은 출력 폴더 이름, 생성 시각, `spec20_index.json`의 자기 출력 항목 경로·sha256뿐, 스크립트에 그대로 적혀 있다). `test_m14_compare.py`는 부분 문자열만 보므로 byte 불변은 이 확인이 맡는다.
+
+(g) **VESSL_REQUIRED, 권장.** 구현 commit을 올린 뒤 `main.py check-env --config rebuild/configs/paper_spec.yaml`을 한 번 돌려 입력·SASRec 대조가 통과함을 본다. MovieLens GPU 학습은 다시 돌리지 않는다.
+
+로컬 결과: (a)–(f)의 단계별 실행 결과는 21장 2026-11-09 구현 행에 있다 (모든 단계를 마친 코드에서의 재실행은 TBD, 단계 s10). (g)는 VESSL 실행 전이다.
+
+### 23.8 시험과 완료 기준
+
+**새 시험 파일** (모두 `rebuild/tests/`에 구현됨, 2026-11-09. `criterion` marker를 붙이지 않는다. 수집 항목 수는 21장 2026-11-09 구현 행).
+
+| 파일 | 내용 | slow |
+|---|---|---|
+| `test_ds_spec.py` | `datasets.py` 표 값 = 23.2 (세 데이터셋), 별칭(`data.NUM_ITEMS` 등) = `MOVIELENS`, `run.expected_inputs` 키와 파일 해시, `sections.py`의 import 시점 표 = `run.expected_inputs`, MovieLens 17개 프로파일 golden (`config_hash`, CRLF를 LF로 바꾼 `dump_config` sha256, 23.7 (a)) | 아니오 |
+| `test_ds_profiles.py` | `configs/datasets/` 18개 load·round-trip(`<d>_cluster_hard` 2개는 `--set cluster.artifact_dir`와 함께), 부모와 다른 키가 23.6 표와 정확히 같음, `Config.validate` 교차 거부, `<d>` 값 일치, stem 전역 유일, `step_counts`와 hybrid 수 = 23.2 표. smoke·과적합 프로파일은 23.2·23.6의 실제 train 표본 수(80·41, 1,385·3,626, 16)로 `step_counts`가 자기 `train.epochs`에서 통과하고, `smoke_cpu`·`smoke_gpu_100`은 `train.epochs=1`(E4·E1 단계)에서도 통과하며 `cluster.live_check_n` ≤ train 표본 수 | 아니오 |
+| `test_ds_data.py` | Steam·LastFM의 실제 파일로 `load_dataset`: 행·표본·블록 수, 지문, 사용자 ID offset, `first_window_empty` 규칙, smoke 선택, `overfit` 행, 제목(354 잘림, 대괄호, UTF-8, CRLF = LF), 잘못된 입력 거부(왼쪽 padding, `len_seq` 불일치, id ≥ `num_items`, 비정수, 둘째 `::`, 해시 불일치) | 예 (train 전체 파싱) |
+| `test_ds_candidates.py` | val·test 직렬화 hash = 23.2, 표시 수 = 23.2, 모든 표본에서 20개·정답 1회·이력 제외 (D10 계약), 후보 id가 `num_items` 안 (seed 1234) | 예 |
+| `test_ds_prompts.py` | `game.txt`·`artist.txt` 해시 로드와 파싱(3 템플릿, 슬롯 순서), `check_catalog_titles` 규칙(D39), 실제 tokenizer로 worst-case 길이 ≤ 1024, 대괄호 제목 prompt의 `check_token_counts` | 예 (tokenizer) |
+| `test_ds_convert.py` | `convert_sasrec.py --dataset <d>`의 digest = 23.2, 원본 22개·변환 20개 텐서(s_fc 2개 제외), 기준 파일 키, `verify_against_reference` CPU bit 일치, `encode_all`이 데이터셋 padding을 씀 | 예 |
+| `test_ds_smoke_cpu.py` | `steam_smoke_cpu`·`lastfm_smoke_cpu`의 `run_smoke`가 `passed`, S0의 입력 해시가 데이터셋 표와 같음, 데이터 표본 수 (임시 폴더) | 예 |
+| `test_ds_compare.py` | `compare_runs`가 Steam·LastFM 실행의 표 D·정의·한계 문구를 고르고 섞인 데이터셋을 `CompareError`로 거부, 개수 없는 표 D 행의 `counts_text`와 Steam N 1184 주석을 출력 그대로 확인, MovieLens 출력은 기존 시험과 같음 | 아니오 |
+| `test_ds_runbook.py` | `RUNBOOK_datasets.md`의 명령이 실제 CLI로 파싱되고 프로파일이 `configs/datasets/`에 있고 `latest`·`rec` 이름이 맞음, 두 데이터셋의 DS1이 DS2보다 앞섬, DS7의 둘째 명령이 `--set eval.batch_invariance_check=true`와 `ILORA_RUN_<D>_E2_REEVAL_BI`, bf16 대안 명령이 데이터셋 프로파일·두 `--set`·`ILORA_RUN_<D>_…`를 씀 | 아니오 |
+| `tests/vessl/test_ds_run_outputs.py` | 실행 폴더 검사 (epoch 완료, 기록 수, N, `candidates_sha256`, 재평가 `reproduction` `identical`, DS7 둘째 실행의 `batch_invariance.json`) (VESSL_REQUIRED, 로컬 skip) | - |
+
+- `test_m13_coverage.py`와의 관계: 새 장 제목 `## 23. …`은 `CHAPTER_RE`(`## n. Mk `)에 맞지 않으므로 M0–M15 완료 기준에 세지 않고, `### 23.8` 아래 번호 줄은 `### c.8 완료 기준` 구역이 아니라 세지 않는다. 이 장에는 `- 합계 N개 (`로 시작하는 줄을 쓰지 않는다(`TOTAL_RE`는 문서 전체에서 정확히 한 줄을 요구). 새 시험에 `criterion` marker를 붙이지 않는다(`collect_markers`가 문서에 없는 번호를 실패시킨다). skip 이유는 두 conftest 모듈(`tests/conftest.py`, `tests/vessl/conftest.py`)의 `DOCUMENTED_SKIP_REASONS`에 있는 상수만 쓴다(`SKIP_NO_TOKENIZER`, `SKIP_NO_SASREC`, `SKIP_NO_GIT_HISTORY`, `VESSL_REQUIRED`, `SKIP_NO_RUN` 등). `test_m13_coverage.py`, `test_m0_sections.py`는 바꾸지 않는다. `test_m0_sections.py`는 DESIGN.md를 읽지 않는다.
+- Steam·LastFM의 converted state가 없으면 `SKIP_NO_SASREC`로 skip한다. 로컬 전체 시험에서는 단계 s05가 `runs/rebuild/assets/sasrec_{steam,lastfm}/`(git 밖, repo_guard 대상 밖)를 만들고, VESSL에서는 DS1이 DS2보다 먼저 만든다(23.6).
+
+**완료 기준 (로컬, Windows CPU)**
+
+1. `datasets.py`의 세 규격이 23.2 표와 같고 MovieLens 규격이 `data.py` 상수와 같다 (`test_ds_spec.py`).
+2. MovieLens 불변 증명 23.7 (a)–(f)가 모두 통과한다.
+3. 프로파일 18개가 읽히고 저장·재읽기에서 해시가 같고, 부모와 다른 키가 23.6 표와 정확히 같다 (`test_ds_profiles.py`).
+4. `prompt.template_path`와 `sasrec.source_sha256` 또는 `data.title_mode`가 어긋난 설정은 ConfigError다 (`test_ds_profiles.py`).
+5. Steam·LastFM의 `load_dataset`이 23.2의 행·표본·블록 수, 지문을 낸다 (`test_ds_data.py`).
+6. id2name 읽기가 CRLF·LF에서 같고 UTF-8로 고정되며 잘못된 줄(필드 수, 빈 파일, 줄 번호)을 거부한다 (`test_ds_data.py`).
+7. 후보 직렬화 hash와 표시 수가 23.2와 같고 후보 계약(D10)이 모든 표본에서 지켜진다 (`test_ds_candidates.py`).
+8. `game.txt`, `artist.txt`가 해시 확인 뒤 3 템플릿으로 파싱되고, `check_catalog_titles`가 D39대로 동작하며 MovieLens 규칙은 그대로다 (`test_ds_prompts.py`, `test_m4_prompts.py`).
+9. 실제 tokenizer의 구성 최장 입력이 `batching.max_seq_len` 안이다 (`test_ds_prompts.py`).
+10. 변환 도구가 23.2의 digest를 내고 CPU 기준 대조가 bit 단위로 같다 (`test_ds_convert.py`).
+11. `step_counts`와 curriculum hybrid 수가 23.2와 같고, smoke 프로파일이 실제 표본 수로 모든 단계(`train.epochs=1`의 E4·E1 포함)에서 `step_counts`와 `cluster.live_check_n` 조건을 지킨다 (`test_ds_profiles.py`).
+12. `steam_smoke_cpu`, `lastfm_smoke_cpu` smoke가 통과한다 (`test_ds_smoke_cpu.py`).
+13. `compare_runs`가 표 D·한계를 데이터셋별로 고르고 섞임을 거부하며, 개수 없는 행은 그 이유를 문구로 적는다 (`test_ds_compare.py`).
+14. `RUNBOOK_datasets.md`의 명령이 실제 CLI와 프로파일로 파싱되고, 순서(두 데이터셋의 DS1이 DS2보다 앞섬), DS7의 두 실행, bf16 대안 명령이 맞다 (`test_ds_runbook.py`).
+15. `test_m13_coverage.py` 전체가 통과한다(새 장이 파서를 깨지 않음).
+
+**완료 기준 (`VESSL_REQUIRED`, 측정 전)**
+
+16. 데이터셋마다 DS1 변환이 23.2 digest를 내고 DS3 `check-env`가 통과한다(SASRec CUDA 대조 ≤ 1e-4).
+17. smoke 2단계와 3단계가 통과한다(과적합은 17.6.8과 같은 기준).
+18. E2·E1 학습이 끝까지 돌고 기록 수가 23.2와 같다(`dsoutputs`).
+19. 재평가의 `reproduction`이 `identical`이다.
+20. 측정값(시간, 메모리, GradScaler skip, DS7의 batch 무관성 일치율, 지표)을 기록한다. 값은 측정 전 TBD이며 어떤 수치도 미리 적지 않는다.
+
+### 23.9 시간과 자원
+
+측정값의 출처는 VESSL GPU smoke 2단계 `runs/rebuild/smoke_gpu_100_20261108T165512Z`(UTC 2026-11-08 16:55 시작, commit 54e5ae0, A100 80GB)다. `smoke_report.json`의 G1 `measurements`(학습 단계 `steps/G1_train_20261108T165521Z`): `train_seconds.train` 992.18 s(2 epoch, 1,806 micro-batch, 크기 8), `step_max_mem_gib` 42.60. 학습 속도 1.82 micro-batch/s = 1,806 / 992.18. 실행 폴더는 VESSL에만 있고 값은 작업 세션 기록에서 옮겼다(21장 2026-11-09 기록). 아래 Steam·LastFM 값은 그 측정을 표본 수와 prompt 토큰 비율로 환산한 **추정**이다. 실제 값은 `TBD`이고 VESSL에서 측정한다.
+
+| 추정 항목 | MovieLens (측정·환산) | Steam (추정) | LastFM (추정) | 방법 |
+|---|---|---|---|---|
+| micro-batch 크기 | 8 | 4 | 8 | D31 |
+| 평균 패딩 토큰 B·L (epoch 0) | 2,180.1 | 1,256.4 | 1,846.5 | 측정 `token_lengths_full.py` |
+| 학습 속도 (micro-batch/s) | 1.82 (측정) | 약 3.2 (토큰 선형) | 약 2.1 | 1.82 × 2,180.1 / (B·L) |
+| epoch당 학습 시간 | 약 1.26시간 | 약 3.3–3.8시간 | 약 0.65–0.77시간 | 아래 |
+| 학습 5 epoch (평가 제외) | 약 6.3시간 | 약 17–19시간 | 약 3.3–3.9시간 | 아래 |
+| 생성 표본 수 (학습 1회, 평가 포함) | 660 | 8,292 | 854 | D11, 표 |
+| 최대 할당 메모리 | 42.6 GiB (측정) | 약 30–43 GiB | 약 33–43 GiB | 아래 |
+
+- 시간 방법: 범위의 아래쪽은 시간 ∝ 패딩 토큰(B·L), 위쪽은 ∝ B·L²(평균: MovieLens 595,435 / Steam 396,116 / LastFM 426,583, 측정 `token_lengths_full.py`)로 환산했다. LastFM은 L이 작아 B·L² 쪽이 범위의 아래가 된다(0.72 대 0.85). epoch 시간 = NB / (micro-batch/s).
+- 메모리 방법: 최장 micro-batch 토큰 B·L이 MovieLens보다 작다(Steam 1,888, LastFM 2,072, MovieLens 2,672). 메모리 전부가 토큰에 비례한다면 아래쪽 값(30, 33 GiB)이고 고정 부분이 크면 위쪽(42.6 GiB)에 가깝다. MovieLens smoke의 실제 최장 B·L은 전체 데이터의 2,672와 다를 수 있어 이 범위는 추정일 뿐이다.
+- Steam 평가: validation이 epoch마다 1,184 표본이다(B = 4에서 296 batch). 평가 시간은 측정 전 TBD다(평가 속도 측정값이 없어 환산하지 않는다). 생성 표본 수 비는 MovieLens의 12.6배다.
+- 디스크: 학습 1회 약 2.07 GiB(18.6.11, 데이터셋과 무관). 기록 파일은 NB·표본 수에 비례한다(측정 전 TBD).
+- GPU는 한 번에 하나다(`[SPEC §0.12]`). 군집 fit의 시간은 Steam 표본 151,048개에서 TBD다.
+
+### 23.10 열린 질문
+
+구현을 막는 항목은 없다. 아래는 근거를 찾을 수 없거나 SPEC 소유자가 정할 일이다(설계 값은 모두 정해져 있어 0.1의 `[미정]`이 아니다).
+
+| 번호 | 항목 | 현재 처리 | 담당 |
+|---|---|---|---|
+| O1 | `[SPEC §0.5]`의 MovieLens 한정을 개정할지 | 2026-11-16 소유자 결정으로 실험 대상이 Steam으로 바뀜 (D45, 24.1) | 해소 |
+| O2 | Steam `Val_data.df`의 출처: `U`에 없고 `F babe9ec` 메시지뿐이다 | sha256으로 고정 (D33) | 출처 확인 불가, 기록만 |
+| O3 | 논문 Steam 행이 어느 데이터 판으로 돌았는가: `U test.ipynb` 출력은 구판 프레임, `U` blob은 수정판이다. iLoRA Steam 행은 이 판 차이로도 설명되지 않는다 (23.2) | 현재 파일을 고정 (D33) | 정할 수 없음, 기록만 |
+
+---
+
+## 24. Steam 단계별 재현 (사다리)
+
+상태: **S0 측정 완료(로컬 CPU, 2026-11-16), S1 구현과 로컬 시험 완료(VESSL 실행 전), S2 미구현, S3–S5는 프로파일만**. 실행 문서는 `R STEAM_LADDER.md`.
+
+### 24.1 목표와 범위
+- MovieLens 측정(2026-11-09, commit `54e5ae0`)에서 E1(K = 1)은 test 36/95, E2(K = 4)는 35/95였고 같은 후보의 SASRec은 32/95였다. 논문 값에 못 미친 원인은 확정하지 못했다.
+- 그래서 완성된 iLoRA를 한 번에 돌리지 않는다. Steam에서 가장 쉬운 단계부터 하나씩 만들고, 결과가 논문 값과 비슷할 때만 다음 단계로 넘어간다 (D45). 어느 단계에서 차이가 생기는지 찾는 것이 목적이다.
+- 실험 대상은 Steam이다. `[SPEC §0.5]`의 MovieLens 한정은 2026-11-16 소유자 결정으로 바뀌었다 (23.10 O1).
+- 23장의 Steam 확장(데이터, 후보, prompt, SASRec 변환, 프로파일)을 그대로 쓴다. 이 장은 단계별 진입점만 더한다.
+- 범위 밖: MovieLens·LastFM 추가 실행, 공개 코드 동작의 재현.
+
+### 24.2 단계와 기준값
+
+| 단계 | 만드는 것 | 앞 단계에 더해지는 것 | 논문 기준 (ValidRatio / HitRatio@1) | 정수 역산 (N = 1,186) | 진입점 |
+|---|---|---|---|---|---|
+| S0 | SASRec 단독 | 데이터, 후보, 고정 SASRec | 1.0000 / 0.4010 | 5 seed 평균이라 정수가 아님 | `R tools/sasrec_baseline.py` |
+| S1 | Llama-2, 학습 없음 | LLM, prompt, 생성, 판정 | 0.1653 / 0.0135 | 유효 196, 정답 16 | `main.py zeroshot` (24.4) |
+| S2 (선택) | LoRA 학습, text-only prompt | LoRA 학습 | 0.9840 / 0.4637 | 유효 1,167, 정답 550 | 미구현 (24.5) |
+| S3 | LLaRA (K = 1) | projector와 행동 토큰, curriculum | 0.9975 / 0.4949 | 유효 1,183, 정답 587 | `main.py train` |
+| S4 | K = 2 | gate, expert 1개 추가 | 약 0.50 | 없음 | `main.py train` |
+| S5 | iLoRA (K = 4) | expert 4개 | 0.9981 / 0.5264 | 공개 파일의 N으로는 정수해 없음 (23.2) | `main.py train` |
+
+- S0–S3의 기준값은 `[LLaRA Table 2 p.8]`이고 iLoRA 표 1의 같은 행과 값이 같다 `[논문 p.7 Table 1]`. S0은 "average results from five different random seeds" `[논문 App E p.17]`.
+- 정수 역산 (계산): 196/1186 = 0.16526, 16/1186 = 0.01349, 1167/1186 = 0.98398, 550/1186 = 0.46374, 1183/1186 = 0.99747, 587/1186 = 0.49494. 네 자리 반올림이 표와 모두 맞는다. 즉 이 행들의 HitRatio@1은 정답/전체이고 N은 `len_seq ≥ 3` 필터 뒤의 test 전체다 (D41, D42).
+- S2는 논문의 TALLRec 행이다: "conducts instruction tuning for LLMs on recommendation corpus"를 후보 선택 과제로 바꾼 것 `[LLaRA §5.2.1 p.7, 각주 2]`. LLaRA 그림 4의 "Textual Feature" 막대도 0.4637이다.
+- S4: "the performance of the 4-expert variant exceeds that of the 2-expert variant by 5.2%, 6.4% and 2.2%" (LastFM, MovieLens, Steam) `[논문 p.9 §4.3.2]`. MovieLens의 그림 값(0.463과 0.530, 22장 근사값)이 차이 0.064와 맞으므로 절대 차이로 읽는다 → Steam K = 2는 약 0.5264 − 0.022 = 0.504. 그림에서 읽은 근사값이라 통과 판정에는 ±0.03과 함께 참고로만 쓴다.
+- 지표: ValidRatio = 유효/전체, 주 비교 값 = 정답/전체(D17의 CombinedMetric), 보조 = 정답/유효.
+- 통과 규칙 (D45): 논문 값이 우리 test 결과의 Wilson 95% 구간 안이면 통과. N = 1,186이면 구간은 약 ±0.03이다. S1은 ValidRatio < 0.5이고 정답/전체 < 0.05이면 통과로 보고 출력을 함께 확인한다: 학습 없는 모델의 유효율은 prompt 형식에 크게 좌우되고 논문은 그 prompt를 밝히지 않았다. 통과하지 못하면 그 단계에서 멈춘다.
+
+### 24.3 S0: SASRec 단독 `R tools/sasrec_baseline.py`
+- 점수: `score(item) = s_fc.weight[item] · z + s_fc.bias[item]`. 평가 후보 20개(D10, `candidates_for(sample, epoch=None)`) 가운데 정답 점수가 다른 19개보다 엄격히 크면 맞힌 것으로 센다 (D47).
+- z는 변환한 고정 encoder `SASRecEncoder.encode_all`(7.6.4)의 출력이고, 이후 모든 단계의 SR-EMB와 같다. `s_fc`는 변환이 버리는 층(7.6.2)이라 공개 pickle에서 직접 읽는다.
+- 안전: pickle의 sha256이 프로파일의 `sasrec.source_sha256`과 같아야 한다. unpickler는 7.6.1의 global 18개만 허용하고, 프로젝트 class 3개는 빈 `nn.Module`로 바꿔 저장된 텐서만 읽는다 (pickle의 코드는 실행되지 않음) `R tools/sasrec_baseline.py load_output_layer`.
+- 산출물: `runs/rebuild/<dataset>_sasrec_baseline_<UTC>/`의 `meta.json`(명령 `sasrec-baseline`, 입력 해시), `baseline.json`(split별 n, 정답, 비율, Wilson 95%, drop_last 보조 값, 정답의 평균 순위, 정답과 최고 경쟁 후보의 최소 점수 차). 논문 숫자는 쓰지 않는다.
+- 측정 (2026-11-16, 로컬 Windows CPU, seed 1234):
+
+| 데이터셋 | split | 정답 | 비율 | Wilson 95% | 논문 |
+|---|---|---|---|---|---|
+| Steam | test | 498/1186 | 0.4199 | 0.3921–0.4482 | 0.4010 |
+| Steam | validation | 485/1184 | 0.4096 | 0.3820–0.4379 | – |
+| MovieLens | test | 32/95 | 0.3368 | 0.2498–0.4366 | 0.3444 |
+| MovieLens | validation | 41/94 | 0.4362 | 0.3404–0.5370 | – |
+
+- 판정: Steam S0 통과. 정답과 최고 경쟁 후보의 점수 차는 최소 2.7e-4(validation), 3.7e-4(test)라 z의 float32 반올림(1e-6 수준)으로 개수가 바뀌지 않는다.
+- 주의: 논문 값은 저자가 학습한 모델 5개의 평균이다. 저장소에는 `rec_model/steam.pt`(공개 스크립트가 쓰는 파일, D36)와 내용이 다른 `rec_model/SASRec_steam.pt`가 있다. 여기서는 D36의 파일만 쟀다.
+
+### 24.4 S1: 학습 없는 LLM (`zeroshot` 명령) `R ilora/evaluate.py run_zero_shot_command`
+- 조건 (D46): `router.routing_mode = none`(K = 1)이고 `prompt.eval_prompt = text_only`. 아니면 실행 폴더를 만들기 전에 `ConfigError` `R ilora/commands.py zero_shot_problems`.
+- 절차:
+  1. 데이터, 템플릿, tokenizer를 읽고 `build_model`로 seed에서 모델을 만든다. checkpoint와 학습 실행을 읽지 않는다.
+  2. 감싼 층(`MoELoRALinear`)의 `lora_B`가 모두 0인지 확인한다. 하나라도 0이 아니면 `EvalError`. B = 0이면 LoRA 기여가 정확히 0이라 출력은 기본 LLM의 출력이다 (12.8 #6).
+  3. `eval.splits`의 split마다 `evaluate_split(..., ckpt_tag="init")`. 산출물은 `eval/init/{split}/`(15.6.8과 같은 파일), `metrics.json`의 `epoch`는 null, `ckpt_meta`의 경로와 sha256도 null.
+  4. `eval/summary.json`: `stage: zero_shot`, 데이터셋, split별 지표와 파일 sha256, `lora_wrapped_layers`, `lora_b_all_zero`.
+- `eval.checkpoints`와 `eval.source_run`은 읽지 않는다. test 평가는 D11과 어긋나지 않는다: D11은 test를 보고 checkpoint를 고르는 것을 막는 규칙이고, 여기서는 평가할 상태가 데이터를 읽기 전에 정해져 있다.
+- text-only prompt는 공개 코드 형식대로 제목 뒤에 `[PH]`를 둔다 (8.6.4). `[PH]`의 임베딩 행은 seed로 만든 고정 값이고 학습되지 않는다 (13.6.2, 13.6.8). 논문은 Llama2 행의 prompt를 밝히지 않았으므로, 결과가 기준에서 멀면 `[PH]` 없는 prompt를 변형으로 검토한다 (24.7).
+- 프로파일: `configs/steam_ladder/steam_s1_zero_shot.yaml` = `steam_llara_baseline` + `prompt.eval_prompt: text_only`.
+
+### 24.5 S2–S5
+- 프로파일 (모두 `configs/steam_ladder/`, 이름이 전역 유일, 실행 폴더 이름이 단계를 드러냄):
+
+| 프로파일 | 부모 | 다른 키 | K | routing | expert scaling (D8) |
+|---|---|---|---|---|---|
+| `steam_s3_llara` | `steam_llara_baseline` | 없음 | 1 | none | 4 |
+| `steam_s4_two_experts` | `steam_paper_spec` | `lora.num_experts: 2` | 2 | dynamic | 8 |
+| `steam_s5_ilora` | `steam_paper_spec` | 없음 | 4 | dynamic | 16 |
+
+- S4는 r = 8을 rank 4인 expert 2개로 나눈다 (식 9, `r % K == 0`).
+- S2는 미구현이다: 학습 prompt를 항상 text-only로 두는 curriculum 값이 없다 (`prompts.CURRICULA`는 `linear`, `all_hybrid`, `reverse`). 넣기로 정하면 그 값을 더한다.
+- S3 이후의 학습 전에는 23.6의 Steam GPU smoke(DS4)와 과적합 점검(DS5)을 먼저 통과시킨다.
+
+### 24.6 시험 `R tests/test_ladder.py`
+- S0: 두 데이터셋의 정답 수가 24.3의 표와 같음(변환 자산이 없으면 `SKIP_NO_SASREC`), 잘못된 sha256·없는 파일·맞지 않는 아이템 수 거부, 허용 목록 밖 global 거부, 실행 폴더와 `baseline.json`.
+- S1: 조건 위반은 실행 폴더를 만들기 전에 `ConfigError`, tiny LLaMA와 Steam smoke 표본으로 명령 전체 실행(`eval/init/` 두 split, text-only 기록, gate 1.0, checkpoint 없음), 0이 아닌 `lora_B`가 있으면 `EvalError`.
+- 프로파일 4개가 Steam이고 단계의 K·routing·평가 prompt를 가짐, `STEAM_LADDER.md`의 bash 줄이 실제 CLI로 해석되고 단계 순서와 같음.
+- 이 장은 M 번호를 갖지 않으므로 17.6.9의 완료 기준 표에 행을 더하지 않는다.
+
+### 24.7 열린 질문
+
+| 번호 | 항목 | 현재 처리 |
+|---|---|---|
+| L1 | S2(text-only LoRA)를 넣을지 | S1 결과를 본 뒤 소유자가 정함. 학습 1회가 더 든다 |
+| L2 | S1의 prompt 형식 (`[PH]` 유무) | 공개 text-only 형식으로 먼저 측정. 기준에서 멀면 `[PH]` 없는 변형을 검토 |
+| L3 | 논문 SASRec 행이 어느 checkpoint인가 | 알 수 없음. `rec_model/steam.pt`로 측정 (24.3) |
+| L4 | S4의 기준값 | 그림에서 읽은 근사값뿐이라 참고로만 씀 (24.2) |

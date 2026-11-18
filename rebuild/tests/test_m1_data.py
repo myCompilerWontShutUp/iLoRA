@@ -179,7 +179,7 @@ def test_fingerprints_and_projection(released):
     other_cluster["cluster"] = np.int32(0)
     assert data.frame_fingerprint(data.project_frame(other_cluster, "train")) == FINGERPRINTS["train"]
     # no cluster information reaches Sample or LoadedData
-    assert [f.name for f in dataclasses.fields(Sample)] == ["split", "row", "user_id", "history", "target"]
+    assert [f.name for f in dataclasses.fields(Sample)] == ["split", "row", "user_id", "history", "target", "num_items"]
     assert [f.name for f in dataclasses.fields(LoadedData)] == ["catalog", "train", "val", "test", "subset",
                                                                 "smoke_users"]
     assert [f.name for f in dataclasses.fields(data.RawRow)] == ["row", "len_seq", "history", "target"]

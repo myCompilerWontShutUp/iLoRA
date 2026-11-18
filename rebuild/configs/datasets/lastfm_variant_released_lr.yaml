@@ -1,0 +1,6 @@
+# lastfm_variant_released_lr.yaml (D29, D30 variant): learning rates of the released train_lastfm.sh
+extends: lastfm_paper_spec.yaml
+train:
+  lr_peak: 7.0e-4
+  lr_warmup_start: 7.0e-6
+  lr_floor: 7.0e-6

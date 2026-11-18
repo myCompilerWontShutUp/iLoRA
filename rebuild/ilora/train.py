@@ -44,6 +44,7 @@ from torch import Tensor, nn
 
 from . import run, seeding
 from .config import config_hash
+from .datasets import spec_of
 from .precision import autocast_for, make_grad_scaler
 
 if TYPE_CHECKING:   # type names only: M4 plan entries, M5 batches, M11 metrics, M0 config sections
@@ -573,7 +574,7 @@ def current_provenance(cfg: "Config", model: Any, *, repo_root: Path = run.REPO_
     assets = asset_record(cfg, repo_root=Path(repo_root), llm_path=llm_path, tokenizer_dir=tokenizer_dir)
     llama = assets.get("llama_config") or None
     input_hashes = {
-        "inputs": run.input_hashes(Path(repo_root)),
+        "inputs": run.input_hashes(Path(repo_root), spec_of(cfg).name),
         "sasrec_state": (assets.get("sasrec_state") or {}).get("sha256"),
         "tokenizer_model": (assets.get("tokenizer_model") or {}).get("sha256"),
         "llama_config": None if llama is None else {"sha256": llama.get("sha256"), "torch_dtype": llama.get("torch_dtype")},
@@ -1303,7 +1304,7 @@ class _Trainer:
         if self.tokenizer_dir is None:
             raise TrainingError("tokenizer folder not available (llama2_7b: LLM_PATH, tiny_random: ILORA_TEST_TOKENIZER)")
         self.data = load_dataset(cfg, self.repo_root)
-        self.templates = load_templates(run.resolve_path(cfg.prompt.template_path, self.repo_root))
+        self.templates = load_templates(run.resolve_path(cfg.prompt.template_path, self.repo_root), spec=spec_of(cfg))
         self.bundle = load_tokenizer(self.tokenizer_dir, cfg.batching.tokenizer_sha256)
         self.sc = step_counts(len(self.data.train), cfg.train)
         artifacts = None
@@ -1314,7 +1315,8 @@ class _Trainer:
             state_path = run.resolve_path(cfg.sasrec.state_path, self.repo_root)
             artifacts = load_cluster_artifacts(run.resolve_path(cfg.cluster.artifact_dir, self.repo_root),
                                                expected_ids=expected_ids, sasrec_sha256=run.content_sha256(state_path),
-                                               data_sha256=run.input_hashes(self.repo_root), ccfg=cfg.cluster)
+                                               data_sha256=run.input_hashes(self.repo_root, spec_of(cfg).name),
+                                               ccfg=cfg.cluster)
             mapping = parse_expert_mapping(cfg.cluster.expert_mapping, n_clusters=artifacts.n_clusters,
                                            num_experts=self.k)
             self.hard_gate = ClusterHardGate(artifacts, mapping, self.k)

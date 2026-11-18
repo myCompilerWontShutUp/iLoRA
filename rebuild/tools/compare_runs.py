@@ -23,6 +23,13 @@ a run whose ``meta.json`` status is not ``completed`` gives ``NOT_RUN`` in every
 numbers are copied from ``metrics.json`` unchanged after checking them against their own counts within 1e-12; a file
 that contradicts itself stops the comparison (``CompareError``, ``meta.json`` failed).
 
+One comparison holds one dataset (§23.1, §23.5 M14, D41): every usable run must name the same one through the
+``prompt.template_path`` of its ``config.yaml`` (D27, M0 ``datasets.for_template``), otherwise ``CompareError``.
+Table D, its notes, the protocol line of the definitions and the limitation items with N or title rules follow that
+dataset; the ``meta.json`` ``inputs`` of the comparison are the input table of that dataset. A comparison with no
+usable run at all names no dataset and keeps the MovieLens texts (the only dataset before §23; every cell is
+``NOT_RUN`` anyway).
+
 ElapsedTime (§18.6.7) of a training run is its compute time ``train_summary.seconds.total``: the training,
 validation and saving time of its completed epochs (kept in each checkpoint's ``val_metrics.json``, so they carry
 across ``--resume``) plus its test time. The idle time between a failure and its resume is not counted (nor the work
@@ -52,7 +59,7 @@ if str(REBUILD_DIR) not in sys.path:          # python -I rebuild/tools/compare_
 
 import yaml  # noqa: E402
 
-from ilora import run  # noqa: E402  (needs the sys.path entry above)
+from ilora import datasets, run  # noqa: E402  (needs the sys.path entry above)
 
 PathLike = Union[str, Path]
 logger = logging.getLogger("ilora.compare")
@@ -125,6 +132,108 @@ LIMITATIONS = (
     "E3 changes only the evaluation prompt. The model was trained with the curriculum (D3) on text-only prompts too, "
     "so E3 is not the result of a model trained text-only.",
 )
+
+# §23.5 M14, D41: table D, its notes and the limitations of the other datasets. The two integer solutions at the Steam
+# N 1184 / 1186 and the "no solution" and "N not identifiable" results are recomputed in tests/test_ds_compare.py
+# (back-solve of 18.6.7: printed value +- 0.5e-4, multi/settings/backsolve_all.py, multi/critic/c2_backsolve.py).
+COPIED_ROW_TEXT = "the LLaRA Table 2 values, copied (not re-run) by the iLoRA paper"
+PAPER_REFERENCE_STEAM = (
+    {"source": "[LLaRA Table 2 p.8]", "row": "LLaRA (SASRec), Steam", "valid_ratio": "0.9975",
+     "hit_ratio_at_1": "0.4949", "counts": (1186, 1183, 587), "denominator": "correct / total",
+     "ours": ("E1", "full", ("valid_ratio", "combined_metric"))},
+    {"source": "[iLoRA paper p.7 Table 1]", "row": "iLoRA, Steam", "valid_ratio": "0.9981",
+     "hit_ratio_at_1": "0.5264", "counts": None, "denominator": None, "ours": None,
+     "counts_text": "no integer solution at N = 1184, 1186, 1192 or 1194 (D41)"},
+    {"source": "[iLoRA paper p.7 Table 1]", "row": "LLaRA, Steam", "valid_ratio": "0.9975",
+     "hit_ratio_at_1": "0.4949", "counts": None, "denominator": None, "ours": None},
+)
+PAPER_REFERENCE_LASTFM = (
+    {"source": "[LLaRA Table 2 p.8]", "row": "LLaRA (SASRec), LastFM", "valid_ratio": "1.0000",
+     "hit_ratio_at_1": "0.4508", "counts": (122, 122, 55), "denominator": "correct / total",
+     "ours": ("E1", "full", ("valid_ratio", "combined_metric"))},
+    {"source": "[iLoRA paper p.7 Table 1]", "row": "iLoRA, LastFM", "valid_ratio": "1.0000",
+     "hit_ratio_at_1": "0.5000", "counts": None, "denominator": None, "ours": None,
+     "counts_text": "(122, 122, 61) or (120, 120, 60): N not identifiable (D41)"},
+    {"source": "[iLoRA paper p.7 Table 1]", "row": "LLaRA, LastFM", "valid_ratio": "1.0000",
+     "hit_ratio_at_1": "0.4508", "counts": None, "denominator": None, "ours": None},
+)
+_TABLE_D_INTRO_MOVIELENS = (
+    "Paper numbers appear only in this table. Each paper row is set against our values of the same "
+    "protocol: E1 full protocol (CombinedMetric = correct / total) against LLaRA, E2 drop_last_bs4 (HR@1 = "
+    "correct / valid) against iLoRA.")
+# D41: the protocol of the iLoRA row cannot be identified, so only the LLaRA row has a counterpart of the same protocol.
+_TABLE_D_INTRO_LLARA_ONLY = (
+    "Paper numbers appear only in this table. The LLaRA row is set against our values of the same protocol: E1 full "
+    "protocol (CombinedMetric = correct / total). The iLoRA row has no counterpart because its protocol cannot be "
+    "identified (D41); our own values are in tables A and C.")
+
+
+def _no_threshold_note(n_test: int) -> str:
+    """The table D note on why no reproduction threshold is set, with the test N of the dataset (18.6.7, D41)."""
+    return (f"No reproduction threshold is set: one seed (D2), one test sample = 1/{n_test}, GPU non-determinism of "
+            "training (D16) and the different run conditions of the reference values (limitations below). "
+            "Differences are given in samples; Wilson intervals stay in the supplementary block of each metrics.json.")
+
+
+@dataclass(frozen=True)
+class PaperText:
+    """The paper reference of one dataset and the wording that depends on it (§23.5 M14): the table D rows, the
+    sentence above the table, the notes below it and the replaced items of ``LIMITATIONS`` (index -> text). The
+    protocol line of the definitions is computed from the test N (``protocol_definition``)."""
+    reference: tuple[Mapping[str, Any], ...]
+    intro: str
+    notes: tuple[str, ...]
+    limitations: Mapping[int, str]
+
+
+PAPER_TEXTS = {
+    datasets.MOVIELENS.name: PaperText(
+        PAPER_REFERENCE, _TABLE_D_INTRO_MOVIELENS,
+        ("Back-solution: the only integer triple with N in 80-95 that rounds to both four-digit values (D17). The "
+         "iLoRA row has N = 92 (batch 4 with drop_last), the LLaRA row N = 95.",
+         f"The paper's Imp.% {PAPER_IMPROVEMENT} = {PAPER_REFERENCE[1]['hit_ratio_at_1']} / "
+         f"{PAPER_REFERENCE[0]['hit_ratio_at_1']} - 1 divides two numbers with different denominators and N; our runs "
+         "are compared only within one protocol.",
+         _no_threshold_note(datasets.MOVIELENS.expected_samples["test"])),
+        {}),
+    datasets.STEAM.name: PaperText(
+        PAPER_REFERENCE_STEAM, _TABLE_D_INTRO_LLARA_ONLY,
+        ("Back-solution of the LLaRA row: at the N the released code can produce (1184, 1186, 1192 and 1194, D41) two "
+         "integer triples round to both four-digit values, (1186, 1183, 587) and (1184, 1181, 586), both "
+         "correct / total. N = 1186 is used: the released LLaRA test loader has no drop_last and ValidRatio is over "
+         "all sequences [LLaRA §5.1.3 p.7]; N = 1184 is the row count after drop_last with batch 4 or 8.",
+         "The paper's Imp.% is printed as 6.36% and computes to 6.36% = 0.5264 / 0.4949 - 1. The N and denominator of "
+         "the iLoRA row are not identified, so this ratio may mix two protocols; our runs are compared only within one "
+         "protocol.",
+         _no_threshold_note(datasets.STEAM.expected_samples["test"])),
+        {2: "One seed, N = 1186: D2, seed 1234 only. One test sample is 1/1186, about 0.0008; the spread of training "
+            "re-runs (D16) is not measured (NOT_RUN).",
+         3: "Title judgement defect (D38): with the fixed candidates, 13 validation and 5 test samples cannot be "
+            "judged correct even with the right title, so CombinedMetric is at most 1171/1184 and 1181/1186 (M2 6.6.6, "
+            "DESIGN 23.2). Flag-free metrics are supplementary only.",
+         4: "Protocols of the paper table: the LLaRA row uses N = 1186 and correct / total (D41); the N and "
+            "denominator of the iLoRA row are not identified (no integer solution at the N of the released code), so "
+            "our runs have no same-protocol value for it; the LLaRA row was copied from the LLaRA paper, not re-run by "
+            "iLoRA [paper p.6 §4]."}),
+    datasets.LASTFM.name: PaperText(
+        PAPER_REFERENCE_LASTFM, _TABLE_D_INTRO_LLARA_ONLY,
+        ("Back-solution of the LLaRA row: (122, 122, 55) is the only integer triple at the N of the released code (122 "
+         "and the drop_last 120) that rounds to both four-digit values; valid = total, so correct / valid and "
+         "correct / total are the same number (D41).",
+         "The paper's Imp.% is printed as 8.51% but computes to 10.91% = 0.5000 / 0.4508 - 1 (the other Imp.% cells of "
+         "the table agree). The N of the iLoRA row is not identifiable, so this ratio may mix two protocols; our runs "
+         "are compared only within one protocol.",
+         _no_threshold_note(datasets.LASTFM.expected_samples["test"])),
+        {2: "One seed, N = 122: D2, seed 1234 only. One test sample is 1/122, about 0.0082; the spread of training "
+            "re-runs (D16) is not measured (NOT_RUN).",
+         3: "Title judgement defect (D38): with the fixed candidates, 0 validation and 0 test samples are unscorable, "
+            "so CombinedMetric can reach 122/122 on both splits (M2 6.6.6, DESIGN 23.2). Flag-free metrics are "
+            "supplementary only.",
+         4: "Protocols of the paper table: the LLaRA row uses N = 122 and correct / total (D41; valid = total, so "
+            "correct / valid is the same number); the N of the iLoRA row is not identifiable (two integer solutions, "
+            "table D), so our runs have no same-protocol value for it; the LLaRA row was copied from the LLaRA paper, "
+            "not re-run by iLoRA [paper p.6 §4]."}),
+}
 
 
 class CompareError(RuntimeError):
@@ -647,11 +756,42 @@ class Report:
     gates_e2: dict[str, Any]
     gates_e4: dict[str, Any]
     clusters: dict[str, Any]
+    dataset: datasets.DatasetSpec                 # the one dataset of every usable run (§23.5 M14)
     created_utc: str
 
     @property
     def rows(self) -> list[dict[str, Any]]:
         return list(self.table.values())
+
+
+def run_dataset(view: RunView) -> datasets.DatasetSpec:
+    """The dataset of a usable run: the ``prompt.template_path`` of its ``config.yaml`` (D27, M0
+    ``datasets.for_template``). A missing or unknown value is a ``CompareError``: the comparison would not know whose
+    paper values it writes."""
+    template = view.config_value("prompt", "template_path")
+    where = view.path / "config.yaml"
+    if missing(template) or not isinstance(template, str):
+        reason = template.reason if missing(template) else f"prompt.template_path = {template!r}"
+        raise CompareError(f"{where}: the dataset of run {view.name!r} cannot be read ({reason})")
+    try:
+        return datasets.for_template(template)
+    except datasets.DatasetError as exc:
+        raise CompareError(f"{where}: {exc}") from exc
+
+
+def comparison_dataset(views: Sequence[RunView]) -> datasets.DatasetSpec:
+    """The one dataset of the comparison (§23.1, §23.5 M14): the dataset of every usable run (training, evaluation,
+    export and cluster runs alike); runs of different datasets are a ``CompareError``. A comparison with no usable
+    run names no dataset and keeps the MovieLens texts (module docstring)."""
+    found: dict[str, list[str]] = {}
+    for view in views:
+        if view.usable:
+            found.setdefault(run_dataset(view).name, []).append(f"{view.name} ({view.role})")
+    if len(found) > 1:
+        listed = "; ".join(f"{name}: {', '.join(where)}" for name, where in found.items())
+        raise CompareError("one comparison holds one dataset (DESIGN 23.1, 23.5 M14), but the usable runs use "
+                           f"several: {listed}")
+    return datasets.SPECS[next(iter(found))] if found else datasets.MOVIELENS
 
 
 def build_report(runs: Mapping[str, Optional[Path]], exports: Mapping[str, Optional[Path]],
@@ -660,13 +800,14 @@ def build_report(runs: Mapping[str, Optional[Path]], exports: Mapping[str, Optio
     views = {name: load_run(name, runs.get(name)) for name in names}
     export_views = {name: load_aux(name, path, "export") for name, path in exports.items()}
     cluster_v = load_aux("cluster", cluster, "cluster")
+    dataset = comparison_dataset([*views.values(), *export_views.values(), cluster_v])
     table = {(name, ckpt, protocol): comparison_row(views[name], ckpt, protocol)
              for name in names for ckpt in CHECKPOINTS for protocol in PROTOCOLS}
     e2x = export_views.get("E2") or open_run("E2", None, "export")
     return Report(runs=views, exports=export_views, cluster=cluster_v, table=table,
                   pairs=[pair_comparison(views[a], views[b]) for a, b in PAIRS],
                   gates_e2=gate_summary_view(e2x, export_epoch(e2x, views["E2"])), gates_e4=eval_gate_view(views["E4"]),
-                  clusters=cluster_view(cluster_v), created_utc=run.utc_now().isoformat())
+                  clusters=cluster_view(cluster_v), dataset=dataset, created_utc=run.utc_now().isoformat())
 
 
 def collect_reasons(report: Report) -> list[str]:
@@ -795,24 +936,14 @@ def counterpart_text(report: Report, ref: Mapping[str, Any]) -> str:
 def table_d(report: Report) -> list[str]:
     header = ("Source", "Row", "ValidRatio", "HitRatio@1", "Integer back-solution (N, valid, correct)",
               "HitRatio@1 denominator", "Our counterpart (from the run files)")
+    paper = PAPER_TEXTS[report.dataset.name]
     rows = []
-    for ref in PAPER_REFERENCE:
+    for ref in paper.reference:
         counts = ref["counts"]
         rows.append((ref["source"], ref["row"], ref["valid_ratio"], ref["hit_ratio_at_1"],
-                     f"({counts[0]}, {counts[1]}, {counts[2]})" if counts else
-                     "the LLaRA Table 2 values, copied (not re-run) by the iLoRA paper", ref["denominator"] or "-",
-                     counterpart_text(report, ref) if ref["ours"] else "-"))
-    llara, ilora = PAPER_REFERENCE[0], PAPER_REFERENCE[1]
-    return ["Paper numbers appear only in this table. Each paper row is set against our values of the same "
-            "protocol: E1 full protocol (CombinedMetric = correct / total) against LLaRA, E2 drop_last_bs4 (HR@1 = "
-            "correct / valid) against iLoRA.", "", *md_table(header, rows), "",
-            "- Back-solution: the only integer triple with N in 80-95 that rounds to both four-digit values (D17). "
-            "The iLoRA row has N = 92 (batch 4 with drop_last), the LLaRA row N = 95.",
-            f"- The paper's Imp.% {PAPER_IMPROVEMENT} = {ilora['hit_ratio_at_1']} / {llara['hit_ratio_at_1']} - 1 "
-            "divides two numbers with different denominators and N; our runs are compared only within one protocol.",
-            "- No reproduction threshold is set: one seed (D2), one test sample = 1/95, GPU non-determinism of "
-            "training (D16) and the different run conditions of the reference values (limitations below). "
-            "Differences are given in samples; Wilson intervals stay in the supplementary block of each metrics.json."]
+                     f"({counts[0]}, {counts[1]}, {counts[2]})" if counts else ref.get("counts_text", COPIED_ROW_TEXT),
+                     ref["denominator"] or "-", counterpart_text(report, ref) if ref["ours"] else "-"))
+    return [paper.intro, "", *md_table(header, rows), "", *(f"- {note}" for note in paper.notes)]
 
 def table_e(report: Report) -> list[str]:
     header = ("Pair (A vs B)", "Epochs (A, B)", "N", "Correct A", "Correct B", "A - B", "Only A correct",
@@ -922,12 +1053,21 @@ def limitations(report: Report) -> list[str]:
                   if view.usable and view.config_value("lora", "scaling_rule") == "total_rank"]
     note = (f" A total_rank run is included: {', '.join(total_rank)}." if total_rank else
             " No variant_total_rank_scaling result is included (NOT_RUN), so these comparisons rest on D8 alone.")
-    items = list(LIMITATIONS)
+    replaced = PAPER_TEXTS[report.dataset.name].limitations      # §23.5 M14: the items with N or title rules
+    items = [replaced.get(index, text) for index, text in enumerate(LIMITATIONS)]
     items[1] += note
     precision = precision_note(report)
     if precision is not None:
         items.append(precision)
     return [f"{i}. {text}" for i, text in enumerate(items, 1)]
+
+
+def protocol_definition(dataset: datasets.DatasetSpec) -> str:
+    """The definitions line of the protocols with the test N of the dataset (D17, D41: the first floor(N/b)*b rows)."""
+    n = dataset.expected_samples["test"]
+    return (f"- Protocol full: every test sample (N = {n} on the full data). drop_last_bs4 / drop_last_bs8: the first "
+            f"floor(N/4)*4 / floor(N/8)*8 samples in row order ({n // 4 * 4} / {n // 8 * 8} for N = {n}), the sample "
+            "sets of the released test loader with batch 4 and 8 and drop_last.")
 
 
 def comparison_md(report: Report) -> str:
@@ -942,9 +1082,7 @@ def comparison_md(report: Report) -> str:
              "first line.",
              "- HR@1 = n_correct / n_valid (released code `hr`, 0 when n_valid = 0).",
              "- CombinedMetric = n_correct / n_total = HR@1 x ValidRatio (released code `metric`).",
-             "- Protocol full: every test sample (N = 95 on the full data). drop_last_bs4 / drop_last_bs8: the first "
-             "floor(N/4)*4 / floor(N/8)*8 samples in row order (92 / 88 for N = 95), the sample sets of the released "
-             "test loader with batch 4 and 8 and drop_last.",
+             protocol_definition(report.dataset),
              "- best_val: the epoch with the most correct validation answers, the later one on ties, fixed before any "
              "test result (D11 (a), the main result). last: the final epoch (D11 (b)).",
              "- Values are written as `value (numerator/denominator)`. ElapsedTime of a training run is "
@@ -1166,6 +1304,10 @@ def run_compare(runs: Mapping[str, Optional[PathLike]], exports: Optional[Mappin
         with run.tracked_run(run_dir):
             try:
                 report = build_report(run_paths, export_paths, cluster_path)
+                log.info("dataset=%s", report.dataset.name)
+                if report.dataset.name != datasets.MOVIELENS.name:
+                    # start_meta has just recorded the default (MovieLens) table (M0); the dataset is known only now
+                    run.update_meta(run_dir, {"inputs": run.input_hashes(repo_root, report.dataset.name)})
                 files = write_outputs(report, run_dir)
                 reasons = collect_reasons(report)
                 run.update_meta(run_dir, {"compare": {"files": files, "not_run_reasons": reasons}})

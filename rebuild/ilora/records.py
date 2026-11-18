@@ -46,7 +46,8 @@ from torch import Tensor, nn
 
 from . import run
 from .candidates import FLAG_NAMES
-from .data import HISTORY_LEN, PAD_ID, SPLITS, Sample, pad_histories
+from .data import HISTORY_LEN, SPLITS, Sample, pad_histories
+from .datasets import spec_of
 from .router import ROW_SUM_ATOL
 from .sasrec import strict_fp32
 
@@ -1053,7 +1054,7 @@ def compute_representations(samples: Sequence[Sample], encoder: "SASRecEncoder",
             for start in range(0, len(samples), size):
                 part = samples[start:start + size]
                 ids = [s.sample_id for s in part]
-                hist_ids, len_seq = pad_histories([s.history for s in part], PAD_ID, HISTORY_LEN)
+                hist_ids, len_seq = pad_histories([s.history for s in part], part[0].num_items, HISTORY_LEN)
                 z = encoder(hist_ids, len_seq)
                 validate_z(z, batch=len(part), dim=d, sample_ids=ids)
                 z_parts.append(z.detach().float().cpu())
@@ -1568,8 +1569,8 @@ def _cluster_hard_gate(cfg: "Config", data: Any, encoder: "SASRecEncoder", repo_
     expected_ids = [s.sample_id for split in SPLITS for s in data.samples(split)]
     state_sha256 = run.content_sha256(run.resolve_path(cfg.sasrec.state_path, repo_root))
     artifacts = load_cluster_artifacts(run.resolve_path(cfg.cluster.artifact_dir, repo_root), expected_ids=expected_ids,
-                                       sasrec_sha256=state_sha256, data_sha256=run.input_hashes(repo_root),
-                                       ccfg=cfg.cluster)
+                                       sasrec_sha256=state_sha256,
+                                       data_sha256=run.input_hashes(repo_root, spec_of(cfg).name), ccfg=cfg.cluster)
     mapping = parse_expert_mapping(cfg.cluster.expert_mapping, n_clusters=artifacts.n_clusters,
                                    num_experts=cfg.lora.num_experts)
     gate = ClusterHardGate(artifacts, mapping, cfg.lora.num_experts)

@@ -117,7 +117,7 @@ SCALAR_CHOICES = {
     "data.title_mode": ("code", "fixed"),
     "data.subset": ("full", "smoke"),
     "candidates.num_candidates": (20,),
-    "prompt.template_path": ("prompt/movie.txt",),
+    "prompt.template_path": ("prompt/movie.txt", "prompt/game.txt", "prompt/artist.txt"),
     "prompt.template_choice": ("random", "fixed"),
     "prompt.train_curriculum": ("linear", "all_hybrid", "reverse"),
     "prompt.eval_prompt": ("hybrid", "text_only"),

@@ -192,7 +192,7 @@ def test_template_path_choice(profile_cfg):
     cfg = profile_cfg("paper_spec")
     assert cfg.prompt.template_path == prompts.TEMPLATE_FILE
     field = next(f for f in dataclasses.fields(PromptConfig) if f.name == "template_path")
-    assert field.metadata["choices"] == (prompts.TEMPLATE_FILE,)
+    assert field.metadata["choices"] == (prompts.TEMPLATE_FILE, "prompt/game.txt", "prompt/artist.txt")
     with pytest.raises(ConfigError, match="prompt.template_path"):
         profile_cfg("paper_spec", "prompt.template_path=prompt/game.txt")
 

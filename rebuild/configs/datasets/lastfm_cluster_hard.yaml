@@ -1,0 +1,5 @@
+# lastfm_cluster_hard.yaml (E4 on LastFM, DESIGN 23.6). cluster.artifact_dir is given only on the command line:
+#   --set cluster.artifact_dir=<cluster run>/cluster   (ConfigError without it)
+extends: lastfm_paper_spec.yaml
+router:
+  routing_mode: cluster_hard

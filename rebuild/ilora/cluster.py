@@ -48,8 +48,8 @@ import torch
 from torch import Tensor
 
 from . import run
-from .data import (DATA_DIR, EXPECTED_SAMPLES, HISTORY_LEN, ITEM_FILE, MIN_LEN_SEQ, PAD_ID, SPLIT_FILES, SPLITS,
-                   Sample, pad_histories)
+from .data import DATA_DIR, HISTORY_LEN, ITEM_FILE, MIN_LEN_SEQ, SPLIT_FILES, SPLITS, Sample, pad_histories
+from .datasets import SPECS, spec_of
 from .records import (SPEC_SPLIT_NAMES, RecordsError, RepresentationTable, compute_representations, load_npz,
                       save_npz, validate_gate)
 from .router import ROW_SUM_ATOL
@@ -1114,10 +1114,11 @@ def run_cluster(cfg: "Config", run_dir: Path, *, repo_root: Path) -> None:
     fp32), z of each split with M12 ``compute_representations(gate_fn=None)`` and the ``records`` export settings
     (``export_num_threads`` 1, ``export_batch_size`` 1024; the same function and values as the M12 export, so z
     needs no E2 run, §19.6.2), then ``write_cluster_artifacts``. The data sha256 recorded are the M0
-    ``run.input_hashes`` values of the four data files (the ``meta.json`` inputs).
+    ``run.input_hashes`` values of the four data files (the ``meta.json`` inputs, ``spec_of(cfg).data_files``).
     """
     check_sklearn_version()
     run_dir, repo_root = Path(run_dir), Path(repo_root)
+    spec = spec_of(cfg)
     out = run_dir / CLUSTER_DIR
     if out.exists():
         raise ClusterError(f"{out} exists; cluster artifacts are never overwritten (M0)")
@@ -1140,10 +1141,10 @@ def run_cluster(cfg: "Config", run_dir: Path, *, repo_root: Path) -> None:
     z_seconds = round(time.perf_counter() - start, 3)
     logger.info("cluster: z of %s samples (d %d) in %.2f s", {s: len(t) for s, t in tables.items()},
                 encoder.hidden_size, z_seconds)
-    inputs = run.input_hashes(repo_root)
+    inputs = run.input_hashes(repo_root, spec.name)
     write_cluster_artifacts(cfg, out, tables, {split: data.samples(split) for split in SPLITS},
                             z_dim=int(encoder.hidden_size), sasrec_info=sasrec_info,
-                            data_sha256={rel: inputs.get(rel) for rel in DATA_FILES}, repo_root=repo_root,
+                            data_sha256={rel: inputs.get(rel) for rel in spec.data_files}, repo_root=repo_root,
                             timings={"data_and_z": z_seconds})
     logger.info("cluster: artifacts written to %s in %.1f s", out, time.perf_counter() - start)
 
@@ -1173,7 +1174,8 @@ def _check_sample_ids(manifest: Mapping, keys: set, train_users: Mapping[str, in
     if len(wanted) != len(expected):
         raise ClusterError("expected_ids has duplicate sample ids")
     counts = _split_counts(expected)
-    current_full = counts == dict(EXPECTED_SAMPLES)       # the full M1 data (66,126 / 94 / 95)
+    # The full M1 data of a dataset (MovieLens 66,126 / 94 / 95, §23.5: a smoke subset can never equal one).
+    current_full = any(counts == dict(s.expected_samples) for s in SPECS.values())
     data = manifest.get("data") if isinstance(manifest.get("data"), Mapping) else {}
     subset = data.get("subset")
     missing = sorted(wanted - keys)
@@ -1315,7 +1317,7 @@ def verify_live_encoder(artifacts: ClusterArtifacts, encoder: "SASRecEncoder", s
         raise ClusterError(f"the encoder is on {None if param is None else param.device}, not on {dev}")
     if getattr(encoder, "state_digest", None) != (artifacts.manifest.get("sasrec") or {}).get("state_digest"):
         raise ClusterError("the encoder state digest differs from the SASRec digest of the cluster artifacts")
-    hist_ids, len_seq = pad_histories([s.history for s in first], PAD_ID, HISTORY_LEN)
+    hist_ids, len_seq = pad_histories([s.history for s in first], first[0].num_items, HISTORY_LEN)
     with torch.no_grad():
         live = encoder(hist_ids.to(dev), len_seq.to(dev))
     live_cpu = live.detach().to("cpu", torch.float32).numpy()

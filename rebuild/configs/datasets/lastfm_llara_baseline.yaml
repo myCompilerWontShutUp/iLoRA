@@ -1,0 +1,6 @@
+# lastfm_llara_baseline.yaml (E1 on LastFM, DESIGN 23.6)
+extends: lastfm_paper_spec.yaml
+lora:
+  num_experts: 1
+router:
+  routing_mode: none

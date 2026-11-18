@@ -1,0 +1,14 @@
+# lastfm_paper_spec.yaml (E2 iLoRA on LastFM, DESIGN 23.6): the keys that differ from ../paper_spec.yaml
+extends: ../paper_spec.yaml
+sasrec:
+  source_path: rec_model/lastfm.pt
+  source_sha256: "6f94253543e0ca3b0bbd42b4f6b94f2c97c9fdfdd36c3b5ad3f6b576a806dd86"
+  state_path: runs/rebuild/assets/sasrec_lastfm/sasrec_lastfm_state.pt
+  state_digest: "6b0d161351901a272fe07ef4c2bf3ccc99e06a487bcaee1c9b88392f59435d85"
+  reference_path: runs/rebuild/assets/sasrec_lastfm/sasrec_lastfm_reference.pt
+prompt:
+  template_path: prompt/artist.txt
+train:
+  lr_peak: 2.0e-4
+  lr_warmup_start: 2.0e-6
+  lr_floor: 2.0e-6

@@ -23,11 +23,16 @@ from dataclasses import dataclass, fields
 from typing import Any, Iterable, Optional, Sequence
 
 from .config import ConfigError, item
-from .run import EXPECTED_INPUTS
+from .datasets import SPECS, DatasetError, for_template
+from .run import EXPECTED_INPUTS, EXPECTED_INPUTS_LASTFM, EXPECTED_INPUTS_STEAM
 
 # ----------------------------------------------------------------------------
 # Shared constants (values fixed by the design, not config keys)
 # ----------------------------------------------------------------------------
+# The input hash tables of the config checks, bound at import time (§23.4): run.expected_inputs reads the
+# module attribute at call time and tests/test_m0_config_run.py:632 replaces it with a table of one file.
+_INPUT_TABLES = {"movielens": EXPECTED_INPUTS, "steam": EXPECTED_INPUTS_STEAM, "lastfm": EXPECTED_INPUTS_LASTFM}
+
 SECTION_NAMES = ("run", "data", "candidates", "sasrec", "prompt", "batching", "projector", "router",
                  "lora", "model", "train", "eval", "records", "cluster")   # §3.1 Config, §4.6.2
 
@@ -151,7 +156,7 @@ class SasrecConfig:
     """``sasrec`` 구역 (M3 §7.6.7). 경로는 절대 경로 또는 저장소 루트 기준 (run.resolve_path)."""
     source_path: str = item("[코드] U·L 같은 blob 41c057dc", "원본 pickle. 변환 도구 입력, meta.json 해시 기록")
     source_sha256: str = item("[코드] (계산값)",
-                              "원본 pickle sha256. M0 EXPECTED_INPUTS['rec_model/movielens.pt']와 같아야 함")
+                              "원본 pickle sha256. prompt.template_path가 고른 데이터셋의 M0 입력 해시와 같아야 함 (§23.4)")
     state_path: str = item("[결정]", "변환 state 파일 (§7.6.1 도구 출력)")
     state_digest: str = item("[결정] (prototype 계산값)", "변환 state 내용 digest (§7.6.2)")
     reference_path: str = item("[결정]", "원본 코드 기준 출력 (check-env, M13)")
@@ -159,10 +164,11 @@ class SasrecConfig:
     def validate(self) -> None:
         _sha256("sasrec.source_sha256", self.source_sha256)
         _sha256("sasrec.state_digest", self.state_digest)
-        # §7.6.7: must equal the M0 expected hash of the original pickle (else a config error)
-        expected = EXPECTED_INPUTS["rec_model/movielens.pt"][0]
-        if self.source_sha256 != expected:
-            _fail("sasrec.source_sha256", f"{self.source_sha256} != EXPECTED_INPUTS value {expected}")
+        # §7.6.7, §23.4: must equal the M0 expected hash of one dataset's original pickle (else a config
+        # error); Config.validate checks that it is the pickle of the dataset that prompt.template_path selects
+        expected = tuple(_INPUT_TABLES[name][spec.sasrec_source][0] for name, spec in SPECS.items())
+        if self.source_sha256 not in expected:
+            _fail("sasrec.source_sha256", f"{self.source_sha256} is not one of the EXPECTED_INPUTS values {expected}")
         for name in ("source_path", "state_path", "reference_path"):
             if not getattr(self, name).strip():
                 _fail(f"sasrec.{name}", "must be a non-empty path")
@@ -171,8 +177,9 @@ class SasrecConfig:
 @dataclass(frozen=True)
 class PromptConfig:
     """``prompt`` 구역 (M4 §8.6.8)."""
-    template_path: str = item("[코드]", "템플릿 파일 (저장소 루트 기준). 다른 값은 M0 해시 검사와 어긋나 거부",
-                              choices=("prompt/movie.txt",))
+    template_path: str = item("[코드]", "템플릿 파일 (저장소 루트 기준). 데이터셋을 고르는 닫힌 키 (D27, §23.4). "
+                                        "선택지 밖의 값은 거부",
+                              choices=tuple(spec.template_file for spec in SPECS.values()))
     template_choice: str = item("[LLaRA §5.1.2 p.7] (D15)", "D15. fixed는 variant_fixed_template",
                                 choices=("random", "fixed"))
     fixed_template_index: Optional[int] = item("[결정]", "fixed면 0 이상 정수 (상한은 M4가 템플릿 수로 확인), "
@@ -467,6 +474,19 @@ class Config:
         # §3.1 section rule: non-empty train_rows -> subset smoke (also in DataConfig.validate)
         if self.data.train_rows and self.data.subset != "smoke":
             _fail("data.train_rows", "needs data.subset == smoke")
+        # §23.4 (D27): prompt.template_path selects the dataset; its SASRec pickle and title modes must match
+        try:
+            spec = for_template(self.prompt.template_path)
+        except DatasetError as exc:
+            raise ConfigError(f"prompt.template_path: {exc}") from exc
+        expected_sasrec = _INPUT_TABLES[spec.name][spec.sasrec_source][0]
+        if self.sasrec.source_sha256 != expected_sasrec:
+            _fail("prompt.template_path", f"{self.prompt.template_path} selects dataset {spec.name}, whose SASRec "
+                                          f"source {spec.sasrec_source} has sha256 {expected_sasrec}, but "
+                                          f"sasrec.source_sha256 is {self.sasrec.source_sha256}")
+        if self.data.title_mode not in spec.title_modes:
+            _fail("data.title_mode", f"{self.data.title_mode!r} is not one of {list(spec.title_modes)} for "
+                                     f"dataset {spec.name} (D20, D38)")
 
 
 __all__ = [

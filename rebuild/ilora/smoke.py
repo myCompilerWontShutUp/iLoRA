@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Callable, Final, Literal, Mapping, Option
 
 from . import run
 from .config import load_config
+from .datasets import spec_of
 
 if TYPE_CHECKING:   # type names only: M5 tokenizer, M1 data, M4 templates, M0 config
     from .batching import TokenizerBundle
@@ -262,7 +263,7 @@ def overfit_generation_check(model: Any, bundle: "TokenizerBundle", templates: "
         raise SmokeError("overfit generation check: the data has no train samples")
     epoch = int(cfg.train.epochs) - 1                       # the keys of the last training epoch (§17.6.8)
     catalog, ids = data.catalog, bundle.ids
-    check_catalog_titles(catalog)                           # M4 §8.6.2; the M5 datasets do this for their own path
+    check_catalog_titles(catalog, spec_of(cfg).title_forbidden)    # M4 §8.6.2; the M5 datasets do this on their path
     n_templates = len(templates.templates)
     prepared = []
     for s in samples:
@@ -612,7 +613,7 @@ class _SmokeRun:
         if tokenizer is None:
             raise SmokeError("tokenizer folder not available (llama2_7b: LLM_PATH, tiny_random: ILORA_TEST_TOKENIZER)")
         bundle = load_tokenizer(Path(tokenizer), cfg.batching.tokenizer_sha256)
-        templates = load_templates(run.resolve_path(cfg.prompt.template_path, self.repo_root))
+        templates = load_templates(run.resolve_path(cfg.prompt.template_path, self.repo_root), spec=spec_of(cfg))
         model = build_model(cfg, bundle, self.data.catalog, llm_path=llm)
         ckpt = train_folder / "checkpoints" / f"epoch{last}"
         sha = load_model_state(ckpt, model)
@@ -683,7 +684,8 @@ def _check_env_step(sr: _SmokeRun, sid: str, cfg: "Config", folder: Path, _resul
                        for key in ("environment_check", "candidates_self_check")},
                       {"environment_check": "passed", "candidates_self_check": "passed"}))
     sr.check(sid, "input_hashes", "data, prompt and SASRec source sha256 equal the expected values (4.6.5)",
-             lambda: (files.meta.get("inputs"), {rel: sha for rel, (sha, _) in run.EXPECTED_INPUTS.items()}))
+             lambda: (files.meta.get("inputs"), {rel: sha for rel, (sha, _) in
+                                                 run.expected_inputs(spec_of(sr.base_cfg).name).items()}))
 
     def sasrec() -> tuple:
         from .sasrec import CUDA_REFERENCE_ATOL
