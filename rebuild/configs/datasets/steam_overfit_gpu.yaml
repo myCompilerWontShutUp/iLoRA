@@ -1,0 +1,12 @@
+# steam_overfit_gpu.yaml (M13 smoke level 3 on Steam: last train window of 16 users with a full window, DESIGN 23.6)
+extends: steam_paper_spec.yaml
+data:
+  subset: smoke
+  smoke_users: [16, 10, 10]
+  train_rows: [39, 94, 129, 133, 210, 230, 316, 329, 344, 601, 748, 749, 762, 795, 812, 939]
+prompt:
+  train_curriculum: all_hybrid
+train:
+  epochs: 25
+  micro_batch_size: 4
+  grad_accum: 1

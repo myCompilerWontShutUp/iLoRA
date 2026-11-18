@@ -1,0 +1,23 @@
+# smoke_cpu.yaml (M13 smoke level 1, local CPU, tiny random LLaMA)
+extends: paper_spec.yaml
+data:
+  subset: smoke
+  smoke_users: [2, 10, 10]
+batching:
+  num_workers: 0
+model:
+  backbone: tiny_random
+  torch_dtype: float32
+  device: cpu
+train:
+  epochs: 2
+  micro_batch_size: 4
+  grad_accum: 4
+  warmup_divisor: 4
+  precision: fp32
+eval:
+  batch_invariance_check: true
+records:
+  flush_every_steps: 5
+cluster:
+  live_check_n: 64

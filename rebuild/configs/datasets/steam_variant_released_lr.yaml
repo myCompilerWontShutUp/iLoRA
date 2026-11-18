@@ -1,0 +1,6 @@
+# steam_variant_released_lr.yaml (D29, D30 variant): learning rates of the released train_steam.sh
+extends: steam_paper_spec.yaml
+train:
+  lr_peak: 5.0e-4
+  lr_warmup_start: 5.0e-6
+  lr_floor: 5.0e-6

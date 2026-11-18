@@ -1,0 +1,5 @@
+# steam_s1_zero_shot.yaml (Steam ladder stage S1, DESIGN 24.4): Llama-2 without training, text-only prompt.
+# Command: main.py zeroshot. One expert without a gate, so the untrained LoRA adds exactly zero.
+extends: ../datasets/steam_llara_baseline.yaml
+prompt:
+  eval_prompt: text_only

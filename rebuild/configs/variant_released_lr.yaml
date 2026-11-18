@@ -1,0 +1,6 @@
+# variant_released_lr.yaml (D5, D6 variant): learning rates of the released train script
+extends: paper_spec.yaml
+train:
+  lr_peak: 8.0e-4
+  lr_warmup_start: 8.0e-6
+  lr_floor: 8.0e-6

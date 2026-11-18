@@ -1,0 +1,5 @@
+# steam_cluster_hard.yaml (E4 on Steam, DESIGN 23.6). cluster.artifact_dir is given only on the command line:
+#   --set cluster.artifact_dir=<cluster run>/cluster   (ConfigError without it)
+extends: steam_paper_spec.yaml
+router:
+  routing_mode: cluster_hard

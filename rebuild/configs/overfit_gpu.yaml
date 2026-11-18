@@ -1,0 +1,12 @@
+# overfit_gpu.yaml (M13 smoke level 3: last train window of users 0-15)
+extends: paper_spec.yaml
+data:
+  subset: smoke
+  smoke_users: [16, 10, 10]
+  train_rows: [71, 196, 377, 554, 797, 1001, 1129, 1234, 1595, 1651, 1905, 2070, 2311, 2693, 2765, 2874]
+prompt:
+  train_curriculum: all_hybrid
+train:
+  epochs: 25
+  micro_batch_size: 4
+  grad_accum: 1

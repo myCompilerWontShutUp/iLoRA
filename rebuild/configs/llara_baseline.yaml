@@ -1,0 +1,6 @@
+# llara_baseline.yaml (E1)
+extends: paper_spec.yaml
+lora:
+  num_experts: 1
+router:
+  routing_mode: none

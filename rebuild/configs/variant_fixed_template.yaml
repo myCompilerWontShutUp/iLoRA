@@ -1,0 +1,5 @@
+# variant_fixed_template.yaml (D15 variant): template 0 for every sample
+extends: paper_spec.yaml
+prompt:
+  template_choice: fixed
+  fixed_template_index: 0

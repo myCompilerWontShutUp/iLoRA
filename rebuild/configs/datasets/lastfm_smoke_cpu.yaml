@@ -1,0 +1,24 @@
+# lastfm_smoke_cpu.yaml (M13 smoke level 1 on LastFM, local CPU, tiny random LLaMA). 41 train samples (DESIGN 23.6):
+#   train.warmup_divisor 3 (T = 6, 3 gives w = 2, 1) and cluster.live_check_n 32 (the smoke_cpu values do not fit).
+extends: lastfm_paper_spec.yaml
+data:
+  subset: smoke
+  smoke_users: [2, 10, 10]
+batching:
+  num_workers: 0
+model:
+  backbone: tiny_random
+  torch_dtype: float32
+  device: cpu
+train:
+  epochs: 2
+  micro_batch_size: 4
+  grad_accum: 4
+  warmup_divisor: 3
+  precision: fp32
+eval:
+  batch_invariance_check: true
+records:
+  flush_every_steps: 5
+cluster:
+  live_check_n: 32

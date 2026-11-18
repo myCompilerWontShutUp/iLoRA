@@ -1,0 +1,8 @@
+# smoke_gpu_100.yaml (M13 smoke level 2, D14: 80 + 10 + 10 users)
+extends: paper_spec.yaml
+data:
+  subset: smoke
+train:
+  epochs: 2
+eval:
+  batch_invariance_check: true

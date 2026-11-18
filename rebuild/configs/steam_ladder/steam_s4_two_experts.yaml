@@ -1,0 +1,5 @@
+# steam_s4_two_experts.yaml (Steam ladder stage S4, DESIGN 24.5): one more expert than LLaRA.
+# K = 2 with the gate of equation 11; r = 8 is split into two experts of rank 4 (equation 9).
+extends: ../datasets/steam_paper_spec.yaml
+lora:
+  num_experts: 2

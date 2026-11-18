@@ -1,0 +1,6 @@
+# variant_bf16.yaml (D9 alternative): use only when fp16 is unstable; record it as a deviation
+extends: paper_spec.yaml
+model:
+  torch_dtype: bfloat16
+train:
+  precision: bf16_amp

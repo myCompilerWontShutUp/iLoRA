@@ -1,0 +1,102 @@
+# E2 iLoRA paper_spec. Every key is listed (DESIGN 4.6.2); evidence in DESIGN 18.6.2.
+run:
+  seed: 1234
+data:
+  title_mode: code
+  subset: full
+  smoke_users: [80, 10, 10]
+  train_rows: []              # empty = not used (DESIGN 5.6.7); only overfit_gpu sets rows
+candidates:
+  num_candidates: 20
+sasrec:
+  source_path: rec_model/movielens.pt
+  source_sha256: "6928a06778d0e5b64ead0641501f73f13beb2c61ca2d881ee15582630d101df9"
+  state_path: runs/rebuild/assets/sasrec/sasrec_movielens_state.pt
+  state_digest: "6a78697b92ce8994250842dc780eac723285e5f51741264c09706e0057c51dae"
+  reference_path: runs/rebuild/assets/sasrec/sasrec_movielens_reference.pt
+prompt:
+  template_path: prompt/movie.txt
+  template_choice: random
+  fixed_template_index: null
+  train_curriculum: linear
+  eval_prompt: hybrid
+batching:
+  label_mode: answer_only
+  num_workers: 8
+  max_seq_len: 1024
+  tokenizer_sha256: "9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347"
+projector: {}
+router:
+  routing_mode: dynamic
+lora:
+  r: 8
+  alpha: 32
+  dropout: 0.1
+  num_experts: 4
+  scaling_rule: expert_rank
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+model:
+  backbone: llama2_7b
+  torch_dtype: float16
+  device: "cuda:0"
+  gen_strategy: greedy
+  gen_max_new_tokens: 64
+  gen_min_new_tokens: 1
+  gen_repetition_penalty: 1.0
+train:
+  epochs: 5
+  micro_batch_size: 8
+  grad_accum: 16
+  lr_peak: 1.0e-4
+  lr_warmup_start: 1.0e-6
+  lr_floor: 1.0e-6
+  warmup_divisor: 20
+  lr_scale_projector: 1.0
+  lr_scale_gate: 1.0
+  lr_scale_lora: 1.0
+  weight_decay_projector: 1.0e-5
+  weight_decay_gate: 1.0e-5
+  weight_decay_lora: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 1.0e-8
+  precision: fp16_amp
+  scaler_init_scale: 65536.0
+  scaler_growth_factor: 2.0
+  scaler_backoff_factor: 0.5
+  scaler_growth_interval: 2000
+  max_consecutive_skips: 16
+  log_every_steps: 10
+eval:
+  batch_size: 8
+  batch_invariance_check: false
+  source_run: null
+  checkpoints: [best_val, last]
+  splits: [val, test]
+records:
+  flush_every_steps: 20
+  activation_max: true
+  gate_rowsum_atol: 1.0e-5
+  gate_crosscheck_atol: 1.0e-5
+  source_run: null
+  export_checkpoints: [best_val, last]
+  export_num_threads: 1
+  export_batch_size: 1024
+  analysis_splits: [test, val, train]
+  figure_formats: [png]
+cluster:
+  unit: sequence
+  n_clusters: 4
+  random_state: 1234
+  n_init: 10
+  init: k-means++
+  algorithm: lloyd
+  max_iter: 300
+  tol: 1.0e-4
+  fit_num_threads: 1
+  expert_mapping: "0:0,1:1,2:2,3:3"
+  artifact_dir: null
+  dynamic_export_dir: null
+  z_crosscheck_atol: 1.0e-5
+  live_check_n: 256
+  live_check_atol: 1.0e-4

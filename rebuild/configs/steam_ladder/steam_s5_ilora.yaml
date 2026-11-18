@@ -1,0 +1,3 @@
+# steam_s5_ilora.yaml (Steam ladder stage S5, DESIGN 24.5): iLoRA with the paper's default of four experts.
+# Same settings as ../datasets/steam_paper_spec.yaml; the file exists so that the run folder carries the stage.
+extends: ../datasets/steam_paper_spec.yaml

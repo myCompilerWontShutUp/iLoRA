@@ -1,0 +1,6 @@
+# lastfm_variant_bf16.yaml (D9 alternative, DESIGN 23.6): use only when fp16 is unstable; record it as a deviation
+extends: lastfm_paper_spec.yaml
+model:
+  torch_dtype: bfloat16
+train:
+  precision: bf16_amp

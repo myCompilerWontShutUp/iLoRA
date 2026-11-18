@@ -1,0 +1,4 @@
+# variant_reverse_curriculum.yaml (D3 variant): hybrid probability 1 - tau/T
+extends: paper_spec.yaml
+prompt:
+  train_curriculum: reverse

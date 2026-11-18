@@ -1,0 +1,4 @@
+# variant_fixed_titles.yaml (D20 variant): corrected title normalization
+extends: paper_spec.yaml
+data:
+  title_mode: fixed
